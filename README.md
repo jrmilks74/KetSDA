@@ -1,1 +1,1 @@
-# KetSDA
+A time series analysis of attendance trends for Kettering Seventh-day Adventist Church in Kettering, Ohio. The church shut down from March 2020 until April 2021 due to COVID19. This project looked at weekly attendance from January 2002 to  March 2020 using five different models before predicting what attendance would have been in the absence of COVID19. The predictions were then compared to actual attendance starting in April 2021.
