@@ -1,11 +1,11 @@
 ---
 title: "An analysis of average weekly attendance per month for Kettering SDA Church"
 author: "James R. Milks"
-date: "Last compiled on `r format(Sys.Date(), '%d %B, %d')`"
+date: "Last compiled on `r format(Sys.Date(), '%d %B, %Y')`"
 output:
-  word_document: default
   html_document:
     df_print: paged
+  word_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -24,6 +24,7 @@ library(timetk)
 library(lubridate)
 library(tidymodels)
 library(forecast)
+library(patchwork)
 setwd("~/Desktop/KetSDA")
 ```
 
@@ -279,11 +280,11 @@ o <- ggplot(Online_Average_by_month, aes(x = month, y = Online)) +
 o
 ```
 
-As you can see, our online ministry grew tremendously from about 100 unique viewers per week in December 2017 to just under 250 unique viewers per week before we shut down in March 2020. Since reopening, our viewership started at around 425 unique viewers per week but has declined to just over 310 unique viewers per week. Unfortunately, there is not enough data yet to explore seasonal patterns or forecast predictions for online attendance alone.
+As you can see, our online ministry grew tremendously from about 100 unique viewers per week in December 2017 to just under 250 unique viewers per week before we shut down in March 2020. Since reopening, our viewership started at around 440 unique viewers per week but has declined to just over 310 unique viewers per week. Unfortunately, there is not enough data yet to explore seasonal patterns or forecast predictions for online attendance alone.
 
 ## In-person plus Online attendance
 
-
+Adding the online attendance to the in-person attendance shows that online attendance now makes up a significant proportion of the total attendance, pushing total attendance to its highest levels in 20 years. However, this comes with one major caveat: We only have unique viewer data from December 2017. The live streaming ministry started around 2012 but earlier versions were archived on Vimeo, not YouTube. Estimates of the size of the online audience on Vimeo do not, to my knowledge, exist. However, given that many of the church service videos we have on Vimeo have yet to gather 100 views total since they were posted between 2012 and 2017, the online audience before we switched to YouTube is likely to be minimal.
 
 ```{r, combined}
 Weekly_total$Combined <- with(Weekly_total,
@@ -297,10 +298,13 @@ Weekly_total$Combined <- with(Weekly_total,
                               )
 
 Combined_Average_by_month <- Weekly_total %>% 
-        group_by(month = floor_date(Date, "month")) %>% 
-        summarize(Combined = mean(Combined, na.rm = TRUE))
+        group_by(Date = floor_date(Date, "month")) %>% 
+        summarize(attendance = mean(Combined, na.rm = TRUE))
 
-p <- ggplot(Combined_Average_by_month, aes(x = month, y = Combined)) +
+Full_Average_by_month <- rbind(Monthly_average_sub, Combined_Average_by_month) %>%
+        mutate(color = ifelse(Date < as.Date("2017-12-01"), "In-person", "In-person + Online"))
+
+p <- ggplot(Full_Average_by_month, aes(x = Date, y = attendance, color = color)) +
         theme_bw() +
         geom_line() +
         geom_point() +
@@ -308,7 +312,97 @@ p <- ggplot(Combined_Average_by_month, aes(x = month, y = Combined)) +
         labs(title = "Weekly mean combined attendance by month 2002-2021",
              subtitle = "Kettering SDA Church, Kettering, Ohio",
              x = "Date",
-             y = "Average weekly combined attendance")
+             y = "Average weekly combined attendance") +
+        scale_fill_continuous(guide = guide_legend()) + 
+        theme(legend.position = "bottom")
 p
 ```
+```{r, contrast total vs in-person}
+g
+```
 
+As we can see, adding in the online viewership increases our weekly average audience to levels last seen in 2002, in sharp contrast to the trend in in-person attendance alone. It appears an increasing percentage of our weekly church audience is meeting with us online.
+
+```{r, barplot attendance, warning = FALSE}
+bar <- Weekly_total %>%
+        filter(Date >= as.Date("2017-12-23")) %>%
+        group_by(Date = floor_date(Date, "month")) %>% 
+        summarize(in.person = mean(attendance, na.rm = TRUE), online = mean(Online, na.rm = TRUE))
+
+bar_pre <- bar %>%
+        filter(Date <= as.Date("2020-03-01")) %>%
+        gather(method, attendees, online:in.person)
+
+bar_post <- bar %>%
+        filter(Date >= as.Date("2021-04-01")) %>%
+        gather(method, attendees, online:in.person)
+
+b_pre <- ggplot(bar_pre, aes(x = Date, y = attendees, fill = method)) +
+        geom_bar(position = "stack", stat = "identity") +
+        labs(title = "Combined weekly attendance pre-pandemic",
+             subtitle = "Kettering SDA Church",
+             x = "Date",
+             y = "Number of attendees")
+
+per_pre <- ggplot(bar_pre, aes(x = Date, y = attendees, fill = method)) +
+        geom_bar(position = "fill", stat = "identity") +
+        labs(title = "Combined weekly attendance pre-pandemic",
+             subtitle = "Kettering SDA Church",
+             x = "Date",
+             y = "Percentage")
+
+b_post <- ggplot(bar_post, aes(x = Date, y = attendees, fill = method)) +
+        geom_bar(position = "stack", stat = "identity") +
+        labs(title = "Combined weekly attendance post-pandemic",
+             subtitle = "Kettering SDA Church",
+             x = "Date",
+             y = "Number of attendees")
+
+per_post <- ggplot(bar_post, aes(x = Date, y = attendees, fill = method)) +
+        geom_bar(position = "fill", stat = "identity") +
+        labs(title = "Combined weekly attendance post-pandemic",
+             subtitle = "Kettering SDA Church",
+             x = "Date",
+             y = "Percentage")
+b_pre / b_post
+
+lfy <- Weekly_total %>%
+        filter(Date >= as.Date("2019-02-01") & Date < as.Date("2020-03-01")) %>%
+        summarize(in.person = mean(attendance, na.rm = TRUE), online = mean(Online, na.rm = TRUE))
+reopening <- Weekly_total %>%
+        filter(Date >= as.Date("2021-04-01")) %>%
+        summarize(in.person = mean(attendance, na.rm = TRUE), online = mean(Online, na.rm = TRUE))
+```
+
+From February 2019 to February 2020 (the last full year before the church shut down for the pandemic), in-person attendance averaged `r lfy$in.person` per week with an average online attendance of `r lfy$online` per week for a total weekly attendance of `r lfy$in.person + lfy$online`. Since reopening, church attendance has averaged `r reopening$in.person + reopening$online` per week, with `r reopening$in.person` meeting in person and `r reopening$online` joining online. In-person attendance is down `r lfy$in.person - reopening$in.person` but an increase of `r reopening$online - lfy$online` in online attendance has made up for the loss of in-person attendance.
+
+```{r, percentage in-person vs online}
+per_pre / per_post
+
+percentages_lfy <- Weekly_total %>%
+        filter(Date >= as.Date("2019-02-01") & Date < as.Date("2020-03-01")) %>%
+        mutate(percent_in.person = (attendance / (attendance + Online)) * 100) %>%
+        mutate(percent_online = (Online / (attendance + Online)) * 100) %>%
+        summarize(in.person = mean(percent_in.person, na.rm = TRUE), online = mean(percent_online, na.rm = TRUE))
+
+percentages_reopening <- Weekly_total %>%
+        filter(Date >= as.Date("2021-04-01")) %>%
+        mutate(percent_in.person = (attendance / (attendance + Online)) * 100) %>%
+        mutate(percent_online = (Online / (attendance + Online)) * 100) %>%
+        summarize(in.person = mean(percent_in.person, na.rm = TRUE), online = mean(percent_online, na.rm = TRUE))
+```
+
+Before the pandemic, an average of `r percentages_lfy$online`% of our weekly audience came from our online ministry. Since reopening, however, `r percentages_reopening$online`% of our weekly audience has been online.
+
+# Conclusions
+
+Engaging with our expanded online audience is imperative for continue church growth. Here are a few of my own suggestions to consider:
+
+        * Increase Zoom access in Sabbath Schools 
+                + N1, N3, N4, and Upper Room Sabbath Schools for adults 
+                + Perichoresis and 4:13 for teens
+        * Zoom access to the children's division Sabbath Schools
+                + Create an online Sabbath School program instead?
+        * Mid-week Bible Studies online
+
+However we respond, the numbers are clear: People are now doing church differently thanks to COVID-19 so we as the church must adapt. History suggests that we will eventually settle on a new normal but given the online revolution it is unclear as yet just what that new normal will be.
