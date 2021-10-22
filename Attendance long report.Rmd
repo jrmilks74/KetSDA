@@ -3,9 +3,9 @@ title: "An analysis of average weekly attendance per month for Kettering SDA Chu
 author: "James R. Milks"
 date: "Last compiled on `r format(Sys.Date(), '%d %B, %Y')`"
 output:
+  word_document: default
   html_document:
     df_print: paged
-  word_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -396,10 +396,10 @@ Before the pandemic, an average of `r percentages_lfy$online`% of our weekly aud
 
 # Conclusions
 
-Engaging with our expanded online audience is imperative for continue church growth. Here are a few of my own suggestions to consider:
+Engaging with our expanded online audience is imperative for continued church growth. Here are a few of my own suggestions to consider for starters:
 
         * Increase Zoom access in Sabbath Schools 
-                + N1, N3, N4, and Upper Room Sabbath Schools for adults 
+                + N3, N4, and Upper Room Sabbath Schools for adults 
                 + Perichoresis and 4:13 for teens
         * Zoom access to the children's division Sabbath Schools
                 + Create an online Sabbath School program instead?
