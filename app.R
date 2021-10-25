@@ -10,13 +10,13 @@
 library(shiny)
 library(shinysurveys)
 
-KetSDA_demograpics <- data.frame(question = c("What is your age?", "What is your gender?", "What is your gender?", "Which service do you normally attend?", "Which service do you normally attend?"),
-                                 option = c("", "Female", "Male", "Ascent", "Sanctuary"),
-                                 input_type = c("numeric", "mc", "mc", "mc", "mc"),
-                                 input_id = c("Age", "gender", "gender", "service", "service"),
-                                 dependence = c(NA, NA, NA, NA, NA),
-                                 dependence_value = c(NA, NA, NA, NA, NA),
-                                 required = c(TRUE, TRUE, TRUE, TRUE, TRUE)
+KetSDA_demograpics <- data.frame(question = c("What is your age?", "What is your gender?", "What is your gender?", "Do you attend in person or online?", "Do you attend in person or online?", "Which service do you normally attend/watch?", "Which service do you normally attend/watch?"),
+                                 option = c("", "Female", "Male", "In person", "Online", "Ascent", "Sanctuary"),
+                                 input_type = c("numeric", "mc", "mc", "mc", "mc", "mc", "mc"),
+                                 input_id = c("Age", "gender", "gender", "mode", "mode", "service", "service"),
+                                 dependence = c(NA, NA, NA, NA, NA, NA, NA),
+                                 dependence_value = c(NA, NA, NA, NA, NA, NA, NA),
+                                 required = c(TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE)
 )
 
 # Define UI for application that draws a histogram
