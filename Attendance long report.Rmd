@@ -3,9 +3,9 @@ title: "An analysis of average weekly attendance per month for Kettering SDA Chu
 author: "James R. Milks"
 date: "Last compiled on `r format(Sys.Date(), '%d %B, %Y')`"
 output:
+  word_document: default
   html_document:
     df_print: paged
-  word_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -41,13 +41,16 @@ Finally, I combined the online viewership and in-person attendance records to ga
 ## In-person attendance
 
 ```{r import data}
-Weekly_total <- read.csv("~/Desktop/KetSDA/Weekly total-Table 1.csv")
+local_file = "Weekly total-Table 1.csv"
+Weekly_total <- read.csv("local_file", header = T)
 Weekly_total$Date <- as.Date(Weekly_total$Date)
 Average_by_month <- Weekly_total %>% 
         group_by(month = floor_date(Date, "month")) %>% 
         summarize(attendance = mean(attendance, na.rm = TRUE))
 names(Average_by_month) <- c("Date", "attendance")
-Monthly_average <- read.csv("~/Desktop/KetSDA/Monthly average-KetSDA.csv")
+
+local_file2 <- "Monthly average-KetSDA.csv"
+Monthly_average <- read.csv("local_file2", header = T)
 Monthly_average$Date <- sprintf("%d-%02d", Monthly_average$Year, Monthly_average$Month)
 Monthly_average_sub <- subset(Monthly_average, Year < 2010)
 Monthly_average_sub <- Monthly_average_sub[,-c(1,2,4)]
@@ -411,12 +414,12 @@ However we respond, the numbers are clear: People are now doing church different
 
 One question I would dearly love to answer is "What is the age distribution of our congregation?" Knowing the answer would allow us to not only more accurately meet the current needs of our congregation but also to plan for future needs. For example, if we see that we're bottom heavy, with a lot of small children, we know that we need to beef up the children's programs now and that in ten years we will have plenty of teenagers and plan to beef up 4:13 and Perichoresis accordingly. Conversely, if we're top heavy with a lot of senior citizens, we can create additional supports for an aging congregation now and also plan for a demographic shift in the future.
 
-I created an example of the type of survey I would like to use to gather this information. You can find it on my Shiny Apps page at https://jrmilks.shinyapps.io/KetSDA_demographics/
+I created a sample of the type of survey I would like to use to gather this information. You can find it on my Shiny Apps page at https://jrmilks.shinyapps.io/KetSDA_demographics/ Note that this is just an example. I'm sure there are more sophisticated ways to gather this information.
 
 # Software used to create this report:
 
 * R version 4.1.1
-* RStudio 2021.09.0+351
+* RStudio 2021.09.0 Build 351
 
 ## Packages
 ```{r, packages_names}
