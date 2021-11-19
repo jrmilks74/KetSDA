@@ -1,7 +1,7 @@
 ---
 title: "An analysis of average weekly attendance per month for Kettering SDA Church"
 author: "James R. Milks"
-date: "Last compiled on `r format(Sys.Date(), '%d %B, %Y')`"
+date: "Last compiled on `r format(Sys.Date(), '%d %B %Y')`"
 output:
   word_document: default
   html_document:
@@ -25,14 +25,13 @@ library(lubridate)
 library(tidymodels)
 library(forecast)
 library(patchwork)
-setwd("~/Desktop/KetSDA")
 ```
 
 ## Methods
 
 I pulled weekly attendance records from January 2010 - March 2020. I then used auto.arima to calculate the best-fit seasonal ARIMA (SARIMA) model and Ljung-Box test to check for autoregression in the residuals of the model as a check on the quality of the model. Unfortunately, the Ljung-Box test indicated that the SARIMA model did not fully model the degree of autoregression in the weekly attendance data.
 
-I then calculated the average weekly attendance per month and combined those results with an older data set containing average weekly attendance from January 2002 to December 2009. I repeated my analysis and found that this time, the Ljung-Box test indicated that the SARIMA model was adequate. Building off that success, I used five different models to forecast the average weekly attendance per month for three years and compared the forecasts to actual in-person attendance since the church reopened in April 2021.
+I then calculated the average weekly attendance per month and combined those results with an older data set containing average weekly attendance from January 2002 to December 2009. I repeated my analysis and found that this time, the Ljung-Box test indicated that the SARIMA model was adequate. Building off that success, I used six different models to forecast the average weekly attendance per month for three years and compared the forecasts to actual in-person attendance since the church reopened in April 2021.
 
 After that, Pastor Tim gathered viewership data for the online broadcast for the church service starting in April 2020 and continuing to this day. We used the first 24-hour unique views as an estimate of the virtual attendance at our online service, both to capture those viewers who watch during and after the premiere but limit the possibilities of repeated views. This likely underestimates true attendance, as multiple people could watch the service during each unique view but will only count as one unique view. I modeled the weekly and monthly average data as well to see if there were any notable patterns.
 
@@ -41,16 +40,14 @@ Finally, I combined the online viewership and in-person attendance records to ga
 ## In-person attendance
 
 ```{r import data}
-local_file = "Weekly total-Table 1.csv"
-Weekly_total <- read.csv("local_file", header = T)
+Weekly_total <- read.csv("Weekly total-Table 1.csv", header = T)
 Weekly_total$Date <- as.Date(Weekly_total$Date)
 Average_by_month <- Weekly_total %>% 
         group_by(month = floor_date(Date, "month")) %>% 
         summarize(attendance = mean(attendance, na.rm = TRUE))
 names(Average_by_month) <- c("Date", "attendance")
 
-local_file2 <- "Monthly average-KetSDA.csv"
-Monthly_average <- read.csv("local_file2", header = T)
+Monthly_average <- read.csv("Monthly average-KetSDA.csv", header = T)
 Monthly_average$Date <- sprintf("%d-%02d", Monthly_average$Year, Monthly_average$Month)
 Monthly_average_sub <- subset(Monthly_average, Year < 2010)
 Monthly_average_sub <- Monthly_average_sub[,-c(1,2,4)]
@@ -95,14 +92,6 @@ pacf(diff(monthly_ts), main = "")
 
 Autocorrelation function (ACF) and partial autocorrelation function (PACF) revealed autocorrelations within both the trend (autoregression) and the statistical noise (moving average) of the data after all trends were removed with a differencing operation. They also revealed seasonal autoregression, wherein each data point is autocorrelated with the data point twelve months prior, confirming the existence of seasonal cycles within the data.
 
-```{r Future}
-future <- subset(Weekly_total, Date > as.Date("2021-04-01"))
-future <- future %>% 
-        group_by(month = floor_date(Date, "month")) %>% 
-        summarize(attendance = mean(attendance, na.rm = TRUE))
-future.ts <- ts(future$attendance, start = c(2021, 4), frequency = 12)
-```
-
 ## Models
 
 I split the existing data into training and testing data sets to assess model accuracy and select the best model. I used 2002-2019 as the training data and 2019-2020 as the testing data set as shown below.
@@ -115,7 +104,7 @@ splits %>%
         tk_time_series_cv_plan() %>%
         plot_time_series_cv_plan(Date, attendance, .interactive = FALSE)
 ```
-The five models I tested were SARIMA, Prophet, GLMNet, Random Forest, and Prophet with XGBoost errors. The last three are all machine learning algorithms. All five were fitted using the training time period and then attempted to predict the testing time period.
+The six models I tested were SARIMA, Prophet, GLMNet, Random Forest, Prophet with XGBoost errors and ARIMA with XGBoost. The last four are all machine learning algorithms. All six were fitted using the training time period and then attempted to predict the testing time period.
 
 ```{r, models, include = FALSE, echo=FALSE}
 # Auto SARIMA model
@@ -166,6 +155,15 @@ workflow_fit_prophet_boost <- workflow() %>%
         add_model(model_spec_prophet_boost) %>%
         add_recipe(recipe_spec) %>%
         fit(training(splits))
+
+##ARIMA Boost
+model_spec_arima_boost <- arima_boost() %>%
+        set_engine("auto_arima_xgboost")
+
+workflow_fit_arima_boost <- workflow() %>%
+        add_model(model_spec_arima_boost) %>%
+        add_recipe(recipe_spec) %>%
+        fit(training(splits))
 ```
 ```{r tables, warning=FALSE, echo=FALSE}
 ## Organize models
@@ -174,7 +172,8 @@ model_table <- modeltime_table(
         model_fit_prophet,
         workflow_fit_glmnet,
         workflow_fit_rf,
-        workflow_fit_prophet_boost
+        workflow_fit_prophet_boost,
+        workflow_fit_arima_boost
 )
 
 # Calibration
@@ -216,10 +215,12 @@ compare <- calibration_table %>%
         filter(.model_id == c(5)) %>%
         modeltime_refit(monthly) %>%
         modeltime_forecast(h = "36 months", actual_data = monthly) %>%
-        filter(.index >= "2021-04-01" & .index <= "2021-10-01") %>%
+        filter(.index >= "2021-04-01" & .index <= "2021-11-01") %>%
         select(.index, .value) %>%
         rename(Month = .index) %>%
         rename(Predicted = .value)
+
+future <- subset(attendance_full, Date >= as.Date("2021-04-01"))
 
 combo_predicted_vs_actual <- cbind(compare, future)
 pred_vs_actual <- combo_predicted_vs_actual %>%
@@ -232,24 +233,24 @@ ggplot(pred_vs_actual, aes(x = Month, y = value, color = Category)) +
         geom_line() +
         theme(legend.position = "bottom") +
         labs(title = "Predicted vs actual in-person attendance",
-             subtitle = "April 2021 - September 2021",
+             subtitle = "April 2021 - November 2021",
              x = "Month",
              y = "Attendance")
 ```
 ```{r percent difference, echo = FALSE, message = FALSE, warning=FALSE}
 percent_diff <- ((future$attendance - compare$Predicted) / compare$Predicted) * 100
-month <- c("2021-04-01", "2021-05-01", "2021-06-01", "2021-07-01", "2021-08-01", "2021-09-01", "2021-10-01")
+month <- c("2021-04-01", "2021-05-01", "2021-06-01", "2021-07-01", "2021-08-01", "2021-09-01", "2021-10-01", "2021-11-01")
 month <- as.Date(month)
 percent_diff_df <- data.frame(month = month, percent_diff = percent_diff)
 ggplot(percent_diff_df, aes(x = month, y = percent_diff)) +
         geom_bar(stat = "identity") +
         labs(title = "Predicted vs actual in-person attendance",
-             subtitle = "April 2021 - October 2021",
+             subtitle = "April 2021 - November 2021",
              x = "Month",
              y = "Percent difference")
 ```
 
-In-person attendance has ranged from `r max(percent_diff)`% lower than predicted in May 2021 down to `r min(percent_diff)`% lower than predicted in August 2021.
+In-person attendance has ranged from `r max(percent_diff)`% lower than predicted in May 2021 down to `r min(percent_diff)`% lower than predicted in August 2021. It has mostly ranged between 20 and 30% lower than predicted.
 
 ## Online Attendance
 
@@ -287,7 +288,7 @@ As you can see, our online ministry grew tremendously from about 100 unique view
 
 ## In-person plus Online attendance
 
-Adding the online attendance to the in-person attendance shows that online attendance now makes up a significant proportion of the total attendance, pushing total attendance to its highest levels in 20 years. However, this comes with one major caveat: We only have unique viewer data from December 2017. The live streaming ministry started around 2012 but earlier versions were archived on Vimeo, not YouTube. Estimates of the size of the online audience on Vimeo do not, to my knowledge, exist. However, given that many of the church service videos we have on Vimeo have yet to gather 100 views total since they were posted between 2012 and 2017, the online audience before we switched to YouTube is likely to be minimal.
+Adding the online attendance to the in-person attendance shows that online attendance now makes up a significant proportion of the total attendance, pushing total attendance to its highest levels in 20 years. However, this comes with one major caveat: We only have unique viewer data from December 2017. The live streaming ministry started around 2012 but earlier versions were archived on Vimeo, not YouTube. Estimates of the size of the online audience on Vimeo do not, to my knowledge, exist. However, given that many of the church service videos we have on Vimeo have yet to gather 100 views total since they were posted between 2012 and 2017, the online audience before we switched to YouTube in December 2017 is likely to be minimal.
 
 ```{r, combined}
 Weekly_total$Combined <- with(Weekly_total,
@@ -307,21 +308,23 @@ Combined_Average_by_month <- Weekly_total %>%
 Full_Average_by_month <- rbind(Monthly_average_sub, Combined_Average_by_month) %>%
         mutate(color = ifelse(Date < as.Date("2017-12-01"), "In-person", "In-person + Online"))
 
-p <- ggplot(Full_Average_by_month, aes(x = Date, y = attendance, color = color)) +
-        theme_bw() +
-        geom_line() +
+monthly_combo <- attendance_full %>% 
+        left_join(Full_Average_by_month, by = "Date") %>% 
+        rename("In-person" = attendance.x, "In-person + Online" = attendance.y) %>%
+        pivot_longer(-c(Date, color)) %>%
+        rename("Category" =  name, "Weekly Attendance" = value)
+
+ggplot(monthly_combo, aes(x = Date, y = `Weekly Attendance`, colour = Category, group = Category)) +
         geom_point() +
-        geom_smooth(method = "loess", formula = "y~x", col = "red") +
-        labs(title = "Weekly mean combined attendance by month 2002-2021",
-             subtitle = "Kettering SDA Church, Kettering, Ohio",
-             x = "Date",
-             y = "Average weekly combined attendance") +
-        scale_fill_continuous(guide = guide_legend()) + 
+        geom_line(size = 1) +
+        geom_smooth(method = "loess", formula = "y~x") +
+        scale_color_hue(direction = 1) +
+        labs(x = "Date",
+             y = "Average weekly attendance",
+             title = "Average weekly attendance by month",
+             subtitle = "Kettering SDA Church") +
+        theme_minimal() +
         theme(legend.position = "bottom")
-p
-```
-```{r, contrast total vs in-person}
-g
 ```
 
 As we can see, adding in the online viewership increases our weekly average audience to levels last seen in 2002, in sharp contrast to the trend in in-person attendance alone. It appears an increasing percentage of our weekly church audience is meeting with us online.
@@ -406,7 +409,7 @@ Engaging with our expanded online audience is imperative for continued church gr
                 + Perichoresis and 4:13 for teens
         * Zoom access to the children's division Sabbath Schools
                 + Create an online Sabbath School program instead?
-        * Mid-week Bible Studies online
+        * Mid-week Bible Studies online?
 
 However we respond, the numbers are clear: People are now doing church differently thanks to COVID-19 so we as the church must adapt. History suggests that we will eventually settle on a new normal but given the online revolution it is unclear as yet just what that new normal will be.
 
@@ -414,7 +417,11 @@ However we respond, the numbers are clear: People are now doing church different
 
 One question I would dearly love to answer is "What is the age distribution of our congregation?" Knowing the answer would allow us to not only more accurately meet the current needs of our congregation but also to plan for future needs. For example, if we see that we're bottom heavy, with a lot of small children, we know that we need to beef up the children's programs now and that in ten years we will have plenty of teenagers and plan to beef up 4:13 and Perichoresis accordingly. Conversely, if we're top heavy with a lot of senior citizens, we can create additional supports for an aging congregation now and also plan for a demographic shift in the future.
 
-I created a sample of the type of survey I would like to use to gather this information. You can find it on my Shiny Apps page at https://jrmilks.shinyapps.io/KetSDA_demographics/ Note that this is just an example. I'm sure there are more sophisticated ways to gather this information.
+I created a sample of the type of survey I would like to use to gather this information. You can find it on my Shiny Apps page at [https://jrmilks.shinyapps.io/KetSDA_demographics/](https://jrmilks.shinyapps.io/KetSDA_demographics/) Note that this is just an example. I'm sure there are more sophisticated ways to gather this information.
+
+# Additional Information
+
+I created an interactive dashboard of both in-person and online attendance at Kettering SDA Church. You can find it online at [https://jrmilks.shinyapps.io/KetSDAweeklyattendance/](https://jrmilks.shinyapps.io/KetSDAweeklyattendance/). In it, you'll find both the previous week's total, in-person, and online attendance, the current monthly average of those three categories, and the year-to-date averages. Additionally, I created an interactive time series graph. You can select between three different data sets to view, then zoom in and out, select specific time periods, and view the coordinates of data points with your mouse.
 
 # Software used to create this report:
 

@@ -6,6 +6,9 @@
 #
 #    http://shiny.rstudio.com/
 #
+#Created by Jim Milks
+#3 November 2021
+#Last update: 15 November 2021
 
 
 library(shiny)
@@ -104,7 +107,9 @@ ui <- fluidPage(
                 plotlyOutput("p"),
                 hr(),
                 h4("Created by: Jim Milks"),
-                "3 November 2021"
+                "3 November 2021",
+                br(),
+                "Updated: 15 November 2021"
         )
     )
 )
