@@ -368,7 +368,7 @@ ui <- fluidPage(
     "Code and data available at:", 
     a(href = "https://github.com/jrmilks74/KetSDA/tree/main", "https://github.com/jrmilks74/KetSDA/tree/main"),
     br(),
-    "Data updated: 05 July 2022"
+    "Data updated: 01 August 2022"
 )
 
 # Define server logic required to render the table and time series plot
