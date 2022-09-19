@@ -613,7 +613,7 @@ ui <- fluidPage(
                                         choices = list("Total" = "Ascent_total",
                                                        "In Person" = "Ascent_in_person",
                                                        "Online" = "Ascent_online"),
-                                        selected = combined),
+                                        selected = Ascent_total),
                             p("There are three data sets to choose from: In-person attendance, online audience, and total attendance. The default view is total attendance.")
                     ),
                     
@@ -637,7 +637,7 @@ ui <- fluidPage(
                                         choices = list("Total" = "Sanctuary_total",
                                                        "In Person" = "Sanctuary_in_person",
                                                        "Online" = "Sanctuary_online"),
-                                        selected = combined),
+                                        selected = Sanctuary_total),
                             p("There are three data sets to choose from: In-person attendance, online audience, and total attendance. The default view is total attendance.")
                     ),
                     mainPanel(
@@ -660,7 +660,7 @@ ui <- fluidPage(
     "Code and data available at:", 
     a(href = "https://github.com/jrmilks74/KetSDA/tree/main", "https://github.com/jrmilks74/KetSDA/tree/main"),
     br(),
-    "Data updated: 12 Sept 2022"
+    "Data updated: 19 Sept 2022"
 )
 
 # Define server logic required to render the table and time series plot
