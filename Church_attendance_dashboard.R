@@ -20,10 +20,19 @@ library(scales)
 library(timetk)
 library(plotly)
 library(knitr)
+library(googlesheets4)
 
 # Loading the data
-Weekly_total <- read.csv("Weekly total-Table 1.csv", header = TRUE)
-Weekly_total$Date <- as.Date(Weekly_total$Date)
+options(
+        gargle_oauth_email = TRUE,
+        gargle_oauth_cache = "KetSDA/.secrets/"
+)
+gs4_auth(email = "office@ketsda.org")
+
+Weekly_total <- read_sheet("https://docs.google.com/spreadsheets/d/1BsQR4TyAMkV2H09jzuj5yrOIotnOBTzLoSZ0r5PsBpk/edit#gid=0",
+                           col_names = TRUE,
+                           col_types = "Dddddd")
+
 Weekly_total$Online <- with(Weekly_total,
                             ifelse(is.na(FirstServe24) & is.na(SecondServe24), NA,
                                    ifelse(is.na(FirstServe24), 0 + SecondServe24,
@@ -53,7 +62,9 @@ Average_by_month <- Weekly_total %>%
 names(Average_by_month) <- c("Date",
                              "attendance")
 
-Monthly_average <- read.csv("Monthly average-KetSDA.csv", header = TRUE)
+Monthly_average <- read_sheet("https://docs.google.com/spreadsheets/d/1DUtoxOBcbZaLovhMUrzyTBtkb8ZqvIveMMMu-eAQMns/edit#gid=0",
+                              col_names = TRUE)
+
 Monthly_average$Date <- sprintf("%d-%02d", Monthly_average$Year, Monthly_average$Month)
 Monthly_average_sub <- subset(Monthly_average, Year < 2010)
 Monthly_average_sub <- Monthly_average_sub[, -c(1, 2, 4)]
