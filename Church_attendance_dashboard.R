@@ -31,7 +31,7 @@ gs4_auth(email = "office@ketsda.org")
 
 Weekly_total <- read_sheet("https://docs.google.com/spreadsheets/d/1BsQR4TyAMkV2H09jzuj5yrOIotnOBTzLoSZ0r5PsBpk/edit#gid=0",
                            col_names = TRUE,
-                           col_types = "Dddddd")
+                           col_types = "Ddddddc")
 
 Weekly_total$Online <- with(Weekly_total,
                             ifelse(is.na(FirstServe24) & is.na(SecondServe24), NA,
@@ -671,7 +671,7 @@ ui <- fluidPage(
     "Code and data available at:", 
     a(href = "https://github.com/jrmilks74/KetSDA/tree/main", "https://github.com/jrmilks74/KetSDA/tree/main"),
     br(),
-    "Data updated: 19 Sept 2022"
+    "Data updated every Monday"
 )
 
 # Define server logic required to render the table and time series plot
