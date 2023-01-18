@@ -12,6 +12,7 @@
 #Version 1 created: 03 November 2021
 #Version 2 created: 17 March 2022. Added tabs 2 and 3
 #Version 2.1 created: 02 June 2022. Added Year-over-year change tables to all tabs
+#Version 3 created 17 Jan 2023. Rewrote data wrangling, added month drop down menu
 
 library(shiny)
 library(tidyverse)
@@ -36,90 +37,83 @@ Weekly_total <- read_sheet("https://docs.google.com/spreadsheets/d/1BsQR4TyAMkV2
 
 # Calculations for the first tab
 ##Create weekly mean per month in-person attendance
-In_person <- Weekly_total %>%
-        select(Date, First, Second) %>%
-        rename(Ascent = First, Sanctuary = Second)
-        pivot_longer(c("Ascent", "Sanctuary"), 
-                     names_to = "Service", 
-                     values_to = "attendance") %>%
+Combined_base <- Weekly_total %>%
+        select(Date, 
+               total.attendance,
+               First, 
+               Second, 
+               FirstServe24, 
+               SecondServe24) %>%
+        rename(In_person = total.attendance,
+               Ascent = First, 
+               Sanctuary = Second,
+               Ascent_online = FirstServe24,
+               Sanctuary_online = SecondServe24) %>%
         group_by(Date) %>%
-        summarize(attendance = sum(attendance, na.rm = TRUE)) %>%
-        mutate(attendance = replace(attendance, attendance == 0, NA)) %>%
+        mutate(online = sum(c(Ascent_online, Sanctuary_online), na.rm = TRUE)) %>%
+        mutate(online = replace(online, online == 0, NA)) %>%
+        mutate(total = sum(c(In_person, Ascent_online, Sanctuary_online), na.rm = TRUE)) %>%
+        mutate(total = replace(total, total == 0, NA)) %>%
+        arrange(Date)
+
+Combined_monthly <- Combined_base %>%
         group_by(Date = floor_date(Date, "month")) %>%
-        summarise(attendance = mean(attendance, na.rm = TRUE))
+        summarize(In_person = mean(In_person, na.rm = TRUE),
+                  online = mean(online, na.rm = TRUE),
+                  total = mean(total, na.rm = TRUE)) %>%
+        arrange(Date)
 
 ###Read in older attendance data
 Monthly_average <- read_sheet("https://docs.google.com/spreadsheets/d/1DUtoxOBcbZaLovhMUrzyTBtkb8ZqvIveMMMu-eAQMns/edit#gid=0",
                               col_names = TRUE)
 
 Monthly_average$Date <- sprintf("%d-%02d", Monthly_average$Year, Monthly_average$Month)
-Monthly_average_sub <- subset(Monthly_average, Year < 2010)
-Monthly_average_sub <- Monthly_average_sub[, -c(1, 2, 4)]
-names(Monthly_average_sub) <- c("attendance",
-                                "Date")
-Monthly_average_sub$Date <- as.Date(paste(Monthly_average_sub$Date, "-01", sep = ""))
+Monthly_average$Date <- as.Date(paste(Monthly_average$Date, "-01", sep = ""))
+Monthly_average <- Monthly_average %>%
+        select(Date, Attendance) %>%
+        rename(attendance = Attendance) %>%
+        filter(Date < "2010-01-01")
 
 ###Combine the older and the recent attendance data into one
-in_person <- rbind(Monthly_average_sub, In_person)
+in_person_alone <- Combined_monthly %>%
+        select(Date, In_person) %>%
+        rename(attendance = In_person)
+        
+in_person_full_data <- rbind(Monthly_average, in_person_alone)
 
 ##Create weekly mean per month online viewership
-online <- Weekly_total %>%
-        select(Date, FirstServe24, SecondServe24) %>%
-        rename(Ascent = FirstServe24, Sanctuary = SecondServe24) %>%
-        pivot_longer(c("Ascent", "Sanctuary"), 
-                     names_to = "Service", 
-                     values_to = "attendance") %>%
-        group_by(Date) %>%
-        summarise(attendance = sum(attendance, na.rm = TRUE)) %>%
-        mutate(attendance = replace(attendance, attendance == 0, NA)) %>%
-        group_by(Date = floor_date(Date, "month")) %>%
-        summarise(attendance = mean(attendance, na.rm = TRUE))
+online <- Combined_monthly %>%
+        select(Date, online) %>%
+        rename(attendance = online) %>%
+        filter(Date > "2017-11-01")
 
 ##Create weekly mean per month total attendance
-combined <- Weekly_total %>%
-        select(Date, First, Second, FirstServe24, SecondServe24) %>%
-        pivot_longer(c("First", "Second", "FirstServe24", "SecondServe24"), 
-                     names_to = "Service", 
-                     values_to = "attendance") %>%
-        group_by(Date) %>%
-        summarise(attendance = sum(attendance, na.rm = TRUE)) %>%
-        mutate(attendance = replace(attendance, attendance == 0, NA)) %>%
-        group_by(Date = floor_date(Date, "month")) %>%
-        summarise(attendance = mean(attendance, na.rm = TRUE))
+combined_part <- Combined_monthly %>%
+        select(Date, total) %>%
+        rename(attendance = total)
+combined <- rbind(Monthly_average, combined_part) %>%
+        arrange(Date)
 
 ##Summarize data by year for combined, online-only, and in-person attendance
-yearly_combined <- Weekly_total %>%
-        select(Date, First, Second, FirstServe24, SecondServe24) %>%
-        pivot_longer(c("First", "Second", "FirstServe24", "SecondServe24"), 
-                     names_to = "Service", 
-                     values_to = "attendance") %>%
-        group_by(Date) %>%
-        summarise(attendance = sum(attendance, na.rm = TRUE)) %>%
-        mutate(attendance = replace(attendance, attendance == 0, NA)) %>%
+Combined_yearly <- Combined_base %>%
         group_by(Date = floor_date(Date, "year")) %>%
-        summarise(attendance = mean(attendance, na.rm = TRUE))
+        summarize(in_person = mean(In_person, na.rm = TRUE),
+                  online = mean(online, na.rm = TRUE),
+                  total = mean(total, na.rm = TRUE)
+                  )
 
-yearly_in_person <- Weekly_total %>%
-        select(Date, First, Second) %>%
-        pivot_longer(c("First", "Second"), 
-                     names_to = "Service", 
-                     values_to = "attendance") %>%
-        group_by(Date) %>%
-        summarise(attendance = sum(attendance, na.rm = TRUE)) %>%
-        mutate(attendance = replace(attendance, attendance == 0, NA)) %>%
-        group_by(Date = floor_date(Date, "year")) %>%
-        summarise(attendance = mean(attendance, na.rm = TRUE))
+yearly_in_person <- Combined_yearly %>%
+        select(Date, in_person) %>%
+        rename(attendance = in_person)
 
-yearly_online <- Weekly_total %>%
-        select(Date, FirstServe24, SecondServe24) %>%
-        pivot_longer(c("FirstServe24", "SecondServe24"), 
-                     names_to = "Service", 
-                     values_to = "attendance") %>%
-        group_by(Date) %>%
-        summarise(attendance = sum(attendance, na.rm = TRUE)) %>%
-        mutate(attendance = replace(attendance, attendance == 0, NA)) %>%
-        group_by(Date = floor_date(Date, "year")) %>%
-        summarise(attendance = mean(attendance, na.rm = TRUE))
+yearly_online <- Combined_yearly %>%
+        select(Date, online) %>%
+        rename(attendance = online) %>%
+        filter(Date >= "2017-01-01")
+
+yearly_combined <- Combined_yearly %>%
+        select(Date, total) %>%
+        rename(attendance = total)
 
 ##Year-over-year actual and percent change
 combined_last_month_change <-
@@ -134,14 +128,14 @@ combined_last_month_percent_change <-
                 )
 
 in_person_last_month_change <-
-        tail(in_person$attendance, 14)[13] -
-        tail(in_person$attendance, 14)[1]
+        tail(in_person_full_data$attendance, 14)[13] -
+        tail(in_person_full_data$attendance, 14)[1]
 
 in_person_last_month_percent_change <-
-        percent(((tail(in_person$attendance, 14)[13] -
-                          tail(in_person$attendance, 14)[1])
+        percent(((tail(in_person_full_data$attendance, 14)[13] -
+                          tail(in_person_full_data$attendance, 14)[1])
                  /
-                         tail(in_person$attendance, 14)[1])
+                         tail(in_person_full_data$attendance, 14)[1])
                 )
 
 online_last_month_change <-
@@ -167,14 +161,14 @@ combined_current_month_percent_change <-
                 )
 
 in_person_current_month_change <-
-        tail(in_person$attendance, 13)[13] -
-        tail(in_person$attendance, 13)[1]
+        tail(in_person_full_data$attendance, 13)[13] -
+        tail(in_person_full_data$attendance, 13)[1]
 
 in_person_current_month_percent_change <-
-        percent(((tail(in_person$attendance, 13)[13] -
-                          tail(in_person$attendance, 13)[1])
+        percent(((tail(in_person_full_data$attendance, 13)[13] -
+                          tail(in_person_full_data$attendance, 13)[1])
                  /
-                         tail(in_person$attendance, 13)[1])
+                         tail(in_person_full_data$attendance, 13)[1])
                 )
 
 online_current_month_change <-
@@ -189,32 +183,18 @@ online_current_month_percent_change <-
                 )
 
 #Pull weekly data together for table
-Weekly_combined <- Weekly_total %>%
-        select(Date, First, Second, FirstServe24, SecondServe24) %>%
-        pivot_longer(c("First", "Second", "FirstServe24", "SecondServe24"), 
-                     names_to = "Service", 
-                     values_to = "attendance") %>%
-        group_by(Date) %>%
-        summarise(attendance = sum(attendance, na.rm = TRUE)) %>%
-        mutate(attendance = replace(attendance, attendance == 0, NA))
+Weekly_in_person <- Combined_base %>%
+        select(Date, In_person) %>%
+        rename(attendance = In_person)
 
-Weekly_in_person <- Weekly_total %>%
-        select(Date, First, Second) %>%
-        pivot_longer(c("First", "Second"), 
-                     names_to = "Service", 
-                     values_to = "attendance") %>%
-        group_by(Date) %>%
-        summarise(attendance = sum(attendance, na.rm = TRUE)) %>%
-        mutate(attendance = replace(attendance, attendance == 0, NA))
+Weekly_online <- Combined_base %>%
+        select(Date, online) %>%
+        rename(attendance = online) %>%
+        filter(Date >= "2017-12-01")
 
-Weekly_online <- Weekly_total %>%
-        select(Date, FirstServe24, SecondServe24) %>%
-        pivot_longer(c("FirstServe24", "SecondServe24"), 
-                     names_to = "Service", 
-                     values_to = "attendance") %>%
-        group_by(Date) %>%
-        summarise(attendance = sum(attendance, na.rm = TRUE)) %>%
-        mutate(attendance = replace(attendance, attendance == 0, NA))
+Weekly_combined <- Combined_base %>%
+        select(Date, total) %>%
+        rename(attendance = total)
 
 ##Pull monthly data out for tables
 previous_month <- month.name[as.numeric(format(as.Date(tail(combined$Date, 13)[12]), "%m"))]
@@ -225,10 +205,10 @@ latest <- matrix(c(tail(Weekly_combined$attendance, 1),
                    tail(Weekly_in_person$attendance, 1),
                    tail(Weekly_online$attendance, 1),
                    tail(combined$attendance, 1),
-                   tail(in_person$attendance, 1),
+                   tail(in_person_full_data$attendance, 1),
                    tail(online$attendance, 1),
                    tail(combined$attendance, 2)[1],
-                   tail(in_person$attendance, 2)[1],
+                   tail(in_person_full_data$attendance, 2)[1],
                    tail(online$attendance, 2)[1],
                    tail(yearly_combined$attendance, 1),
                    tail(yearly_in_person$attendance, 1),
@@ -295,23 +275,22 @@ Ascent <- Weekly_total %>%
         rename(Ascent = First, Ascent_online = FirstServe24) %>%
         group_by(Date) %>%
         mutate(total = sum(c(Ascent, Ascent_online), na.rm = TRUE)) %>%
-        mutate(total = replace(total, total == 0, NA))
+        mutate(total = replace(total, total == 0, NA)) %>%
+        arrange(Date)
 
 ##Weekly mean per month
 Ascent_monthly_average <- Ascent %>%
         group_by(month = floor_date(Date, "month")) %>%
         summarize(in.person = mean(Ascent, na.rm = TRUE),
                   online = mean(Ascent_online, na.rm = TRUE),
-                  total = mean(total, na.rm = TRUE)
-                  )
+                  total = mean(total, na.rm = TRUE))
 
 ##Weekly mean per year
 Ascent_yearly_average <- Ascent %>%
         group_by(year = floor_date(Date, "year")) %>%
         summarize(in.person = mean(Ascent, na.rm = TRUE),
                   online = mean(Ascent_online, na.rm = TRUE),
-                  total = mean(total, na.rm = TRUE)
-                  )
+                  total = mean(total, na.rm = TRUE))
 
 ##Total and percent change year-over-year
 Ascent_combined_last_month_change <-
@@ -465,7 +444,8 @@ Sanctuary <- Weekly_total %>%
         rename(Sanctuary = Second, Sanctuary_online = SecondServe24) %>%
         group_by(Date) %>%
         mutate(total = sum(c(Sanctuary, Sanctuary_online), na.rm = TRUE)) %>%
-        mutate(total = replace(total, total == 0, NA))
+        mutate(total = replace(total, total == 0, NA)) %>%
+        arrange(Date)
 
 ##Weekly average per month
 Sanctuary_monthly_average <- Sanctuary %>%
@@ -643,15 +623,17 @@ ui <- fluidPage(
             "Overall",
             sidebarLayout(
                     sidebarPanel(
-                            selectInput("dataset", label = h3("Attendance data set"),
+                            selectInput("dataset", 
+                                        label = h3("Attendance data set"),
                                         choices = list("Combined" = "combined",
                                                        "In Person" = "in_person",
                                                        "Online" = "online"),
                                         selected = combined),
                             p("There are three data sets to choose from: In-person attendance, online audience, and combined in-person + online. The default view is the combined data set."),
                             
-                            selectInput("time", label = h3("Month"),
-                                        choices = list("All" = "all",
+                            selectInput("time", 
+                                        label = h3("Month"),
+                                        choices = list("All" = "all_months",
                                                        "January" = "jan",
                                                        "February" = "feb",
                                                        "March" = "mar",
@@ -664,7 +646,7 @@ ui <- fluidPage(
                                                        "October" = "oct",
                                                        "November" = "nov",
                                                        "December" = "dec"),
-                                        selected = all),
+                                        selected = "all_months"),
                             p("Select the month to display on the graph")
                     ),
                     
@@ -684,15 +666,17 @@ ui <- fluidPage(
             "Ascent",
             sidebarLayout(
                     sidebarPanel(
-                            selectInput("Ascent_dataset", label = h3("Attendance data set"),
+                            selectInput("Ascent_dataset", 
+                                        label = h3("Attendance data set"),
                                         choices = list("Total" = "Ascent_total",
                                                        "In Person" = "Ascent_in_person",
                                                        "Online" = "Ascent_online"),
                                         selected = Ascent_total),
-                            p("There are three data sets to choose from: In-person attendance, online audience, and total attendance. The default view is total attendance.")
+                            p("There are three data sets to choose from: In-person attendance, online audience, and total attendance. The default view is total attendance."),
                             
-                            selectInput("Ascent_time", label = h3("Month"),
-                                        choices = list("All" = "all",
+                            selectInput("Ascent_time", 
+                                        label = h3("Month"),
+                                        choices = list("All" = "all_months",
                                                        "January" = "jan",
                                                        "February" = "feb",
                                                        "March" = "mar",
@@ -705,7 +689,7 @@ ui <- fluidPage(
                                                        "October" = "oct",
                                                        "November" = "nov",
                                                        "December" = "dec"),
-                                        selected = all),
+                                        selected = "all_months"),
                             p("Select the month to display on the graph")
                     ),
                     
@@ -725,15 +709,17 @@ ui <- fluidPage(
             "Sanctuary",
             sidebarLayout(
                     sidebarPanel(
-                            selectInput("Sanctuary_dataset", label = h3("Attendance data set"),
+                            selectInput("Sanctuary_dataset", 
+                                        label = h3("Attendance data set"),
                                         choices = list("Total" = "Sanctuary_total",
                                                        "In Person" = "Sanctuary_in_person",
                                                        "Online" = "Sanctuary_online"),
                                         selected = Sanctuary_total),
-                            p("There are three data sets to choose from: In-person attendance, online audience, and total attendance. The default view is total attendance.")
+                            p("There are three data sets to choose from: In-person attendance, online audience, and total attendance. The default view is total attendance."),
                             
-                            selectInput("Sanctuary_time", label = h3("Month"),
-                                        choices = list("All" = "all",
+                            selectInput("Sanctuary_time", 
+                                        label = h3("Month"),
+                                        choices = list("All" = "all_months",
                                                        "January" = "jan",
                                                        "February" = "feb",
                                                        "March" = "mar",
@@ -746,7 +732,7 @@ ui <- fluidPage(
                                                        "October" = "oct",
                                                        "November" = "nov",
                                                        "December" = "dec"),
-                                        selected = all),
+                                        selected = "all_months"),
                             p("Select the month to display on the graph")
                     ),
                     mainPanel(
@@ -764,13 +750,13 @@ ui <- fluidPage(
     
     hr(),
     h4("Created by: Jim Milks"),
-    "Version 2.1",
+    "Version 3.0",
     br(),
     "Code and data available at:", 
     a(href = "https://github.com/jrmilks74/KetSDA/tree/main", "https://github.com/jrmilks74/KetSDA/tree/main"),
     br(),
     "Data updated every Monday"
-)
+    )
 
 # Define server logic required to render the table and time series plot
 server <- function(input, output) {
@@ -779,7 +765,7 @@ server <- function(input, output) {
         
         data_reactive <- reactive({
                 if (input$dataset == "in_person")
-                        in_person
+                        in_person_full_data
                 else if (input$dataset == "online")
                         online
                 else
@@ -820,10 +806,10 @@ server <- function(input, output) {
                         filter(month(Date) == time_period())
                 
                 ggplot(data = data_set, aes(x = Date, y = attendance)) +
+                        theme_classic() +
                         geom_point() +
                         geom_line() +
                         geom_smooth(method = "loess", formula = "y~x", col = "red") +
-                        bbc_style() +
                         labs(title = "Weekly average attendance by month",
                              x = "Date",
                              y = "Average attendance")
@@ -879,10 +865,10 @@ server <- function(input, output) {
                     filter(month(Date) == Ascent_time_period())
             
             ggplot(data = Ascent_data_set, aes(x = Date, y = attendance)) +
+                    theme_classic() +
                     geom_point() +
                     geom_line() +
                     geom_smooth(method = "loess", formula = "y~x", col = "red") +
-                    bbc_style() +
                     labs(title = "Weekly average attendance by month",
                          x = "Date",
                          y = "Average attendance")
@@ -937,10 +923,10 @@ server <- function(input, output) {
                         filter(month(Date) == Sanctuary_time_period())
                 
                 ggplot(data = Sanctuary_data_set, aes(x = Date, y = attendance)) +
+                        theme_classic() +
                         geom_point() +
                         geom_line() +
                         geom_smooth(method = "loess", formula = "y~x", col = "red") +
-                        bbc_style() +
                         labs(title = "Weekly average attendance by month",
                              x = "Date",
                              y = "Average attendance")
