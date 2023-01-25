@@ -37,31 +37,34 @@ Weekly_total <- read_sheet("https://docs.google.com/spreadsheets/d/1BsQR4TyAMkV2
 
 # Calculations for the first tab
 ##Create weekly mean per month in-person attendance
-Combined_base <- Weekly_total %>%
+base_data_set <- Weekly_total %>%
         select(Date, 
-               total.attendance,
+               total.attendance, 
                First, 
                Second, 
                FirstServe24, 
                SecondServe24) %>%
-        rename(In_person = total.attendance,
+        rename(In_person = total.attendance, 
                Ascent = First, 
-               Sanctuary = Second,
-               Ascent_online = FirstServe24,
+               Sanctuary = Second, 
+               Ascent_online = FirstServe24, 
                Sanctuary_online = SecondServe24) %>%
         group_by(Date) %>%
-        mutate(online = sum(c(Ascent_online, Sanctuary_online), na.rm = TRUE)) %>%
-        mutate(online = replace(online, online == 0, NA)) %>%
-        mutate(total = sum(c(In_person, Ascent_online, Sanctuary_online), na.rm = TRUE)) %>%
-        mutate(total = replace(total, total == 0, NA)) %>%
-        arrange(Date)
-
-Combined_monthly <- Combined_base %>%
+        mutate(Online = sum(c(Ascent_online, Sanctuary_online), na.rm = TRUE)) %>%
+        mutate(Online = replace(Online, Online == 0, NA)) %>%
+        mutate(Total = sum(c(In_person, Online), na.rm = TRUE)) %>%
+        mutate(Total = replace(Total, Total == 0, NA)) %>%
         group_by(Date = floor_date(Date, "month")) %>%
-        summarize(In_person = mean(In_person, na.rm = TRUE),
-                  online = mean(online, na.rm = TRUE),
-                  total = mean(total, na.rm = TRUE)) %>%
-        arrange(Date)
+        summarise(Ascent = mean(Ascent, na.rm = TRUE),
+                  Sanctuary = mean(Sanctuary, na.rm = TRUE),
+                  Ascent_online = mean(Ascent_online, na.rm = TRUE),
+                  Sanctuary_online = mean(Sanctuary_online, na.rm = TRUE),
+                  In_person = mean(In_person, na.rm = TRUE),
+                  Online = mean(Online, na.rm = TRUE),
+                  Total = mean(Total, na.rm = TRUE)) %>%
+        mutate(Month = month(Date, label = TRUE),
+               Year = year(Date)) %>%
+        mutate(Era = ifelse(Date <= "2020-03-01", "Prepandemic", ifelse(Date > "2020-03-01" & Date < "2021-04-01", "Pandemic", "Postpandemic")))
 
 ###Read in older attendance data
 Monthly_average <- read_sheet("https://docs.google.com/spreadsheets/d/1DUtoxOBcbZaLovhMUrzyTBtkb8ZqvIveMMMu-eAQMns/edit#gid=0",
@@ -75,45 +78,64 @@ Monthly_average <- Monthly_average %>%
         filter(Date < "2010-01-01")
 
 ###Combine the older and the recent attendance data into one
-in_person_alone <- Combined_monthly %>%
+in_person_alone <- base_data_set %>%
         select(Date, In_person) %>%
         rename(attendance = In_person)
         
 in_person_full_data <- rbind(Monthly_average, in_person_alone)
 
 ##Create weekly mean per month online viewership
-online <- Combined_monthly %>%
-        select(Date, online) %>%
-        rename(attendance = online) %>%
-        filter(Date > "2017-11-01")
+online <- base_data_set %>%
+        select(Date, Online) %>%
+        rename(attendance = Online) %>%
+        filter(Date >= "2017-12-01")
 
 ##Create weekly mean per month total attendance
-combined_part <- Combined_monthly %>%
-        select(Date, total) %>%
-        rename(attendance = total)
-combined <- rbind(Monthly_average, combined_part) %>%
-        arrange(Date)
+combined_part <- base_data_set %>%
+        select(Date, Total) %>%
+        rename(attendance = Total)
+
+combined <- rbind(Monthly_average, combined_part)
 
 ##Summarize data by year for combined, online-only, and in-person attendance
-Combined_yearly <- Combined_base %>%
+Combined_yearly <- Weekly_total %>%
+        select(Date, 
+               total.attendance, 
+               First, 
+               Second, 
+               FirstServe24, 
+               SecondServe24) %>%
+        rename(In_person = total.attendance, 
+               Ascent = First, 
+               Sanctuary = Second, 
+               Ascent_online = FirstServe24, 
+               Sanctuary_online = SecondServe24) %>%
+        group_by(Date) %>%
+        mutate(Online = sum(c(Ascent_online, Sanctuary_online), na.rm = TRUE)) %>%
+        mutate(Online = replace(Online, Online == 0, NA)) %>%
+        mutate(Total = sum(c(In_person, Online), na.rm = TRUE)) %>%
+        mutate(Total = replace(Total, Total == 0, NA)) %>%
         group_by(Date = floor_date(Date, "year")) %>%
-        summarize(in_person = mean(In_person, na.rm = TRUE),
-                  online = mean(online, na.rm = TRUE),
-                  total = mean(total, na.rm = TRUE)
-                  )
+        summarise(Ascent = mean(Ascent, na.rm = TRUE),
+                  Sanctuary = mean(Sanctuary, na.rm = TRUE),
+                  Ascent_online = mean(Ascent_online, na.rm = TRUE),
+                  Sanctuary_online = mean(Sanctuary_online, na.rm = TRUE),
+                  In_person = mean(In_person, na.rm = TRUE),
+                  Online = mean(Online, na.rm = TRUE),
+                  Total = mean(Total, na.rm = TRUE))
 
 yearly_in_person <- Combined_yearly %>%
-        select(Date, in_person) %>%
-        rename(attendance = in_person)
+        select(Date, In_person) %>%
+        rename(attendance = In_person)
 
 yearly_online <- Combined_yearly %>%
-        select(Date, online) %>%
-        rename(attendance = online) %>%
+        select(Date, Online) %>%
+        rename(attendance = Online) %>%
         filter(Date >= "2017-01-01")
 
 yearly_combined <- Combined_yearly %>%
-        select(Date, total) %>%
-        rename(attendance = total)
+        select(Date, Total) %>%
+        rename(attendance = Total)
 
 ##Year-over-year actual and percent change
 combined_last_month_change <-
@@ -183,18 +205,36 @@ online_current_month_percent_change <-
                 )
 
 #Pull weekly data together for table
-Weekly_in_person <- Combined_base %>%
+weekly_base_data <- Weekly_total %>%
+        select(Date, 
+               total.attendance, 
+               First, 
+               Second, 
+               FirstServe24, 
+               SecondServe24) %>%
+        rename(In_person = total.attendance, 
+               Ascent = First, 
+               Sanctuary = Second, 
+               Ascent_online = FirstServe24, 
+               Sanctuary_online = SecondServe24) %>%
+        group_by(Date) %>%
+        mutate(Online = sum(c(Ascent_online, Sanctuary_online), na.rm = TRUE)) %>%
+        mutate(Online = replace(Online, Online == 0, NA)) %>%
+        mutate(Total = sum(c(In_person, Online), na.rm = TRUE)) %>%
+        mutate(Total = replace(Total, Total == 0, NA))
+
+Weekly_in_person <- weekly_base_data %>%
         select(Date, In_person) %>%
         rename(attendance = In_person)
 
-Weekly_online <- Combined_base %>%
-        select(Date, online) %>%
-        rename(attendance = online) %>%
+Weekly_online <- weekly_base_data %>%
+        select(Date, Online) %>%
+        rename(attendance = Online) %>%
         filter(Date >= "2017-12-01")
 
-Weekly_combined <- Combined_base %>%
-        select(Date, total) %>%
-        rename(attendance = total)
+Weekly_combined <- weekly_base_data %>%
+        select(Date, Total) %>%
+        rename(attendance = Total)
 
 ##Pull monthly data out for tables
 previous_month <- month.name[as.numeric(format(as.Date(tail(combined$Date, 13)[12]), "%m"))]
@@ -270,23 +310,29 @@ rownames(total_change_table) <- c("Month",
 
 # Calculations for the Ascent tab
 ##Create the base dataset
-Ascent <- Weekly_total %>%
-        select(Date, First, FirstServe24) %>%
-        rename(Ascent = First, Ascent_online = FirstServe24) %>%
+Ascent_base <- Weekly_total %>%
+        select(Date,
+               First, 
+               FirstServe24) %>%
+        rename(Ascent = First,
+               Ascent_online = FirstServe24) %>%
         group_by(Date) %>%
         mutate(total = sum(c(Ascent, Ascent_online), na.rm = TRUE)) %>%
         mutate(total = replace(total, total == 0, NA)) %>%
         arrange(Date)
 
 ##Weekly mean per month
-Ascent_monthly_average <- Ascent %>%
-        group_by(month = floor_date(Date, "month")) %>%
+Ascent_monthly_average <- Ascent_base %>%
+        group_by(Date = floor_date(Date, "month")) %>%
         summarize(in.person = mean(Ascent, na.rm = TRUE),
                   online = mean(Ascent_online, na.rm = TRUE),
-                  total = mean(total, na.rm = TRUE))
+                  total = mean(total, na.rm = TRUE)) %>%
+        mutate(Month = month(Date, label = TRUE),
+               Year = year(Date)) %>%
+        mutate(Era = ifelse(Date <= "2020-03-01", "Prepandemic", ifelse(Date > "2020-03-01" & Date < "2021-04-01", "Pandemic", "Postpandemic")))
 
 ##Weekly mean per year
-Ascent_yearly_average <- Ascent %>%
+Ascent_yearly_average <- Ascent_base %>%
         group_by(year = floor_date(Date, "year")) %>%
         summarize(in.person = mean(Ascent, na.rm = TRUE),
                   online = mean(Ascent_online, na.rm = TRUE),
@@ -359,8 +405,8 @@ Ascent_online_current_month_percent_change <-
                 )
 
 ###Pull out monthly data
-Ascent_previous_month <- month.name[as.numeric(format(as.Date(tail(Ascent_monthly_average$month, 13)[12]), "%m"))]
-Ascent_current_month <- month.name[as.numeric(format(as.Date(tail(Ascent_monthly_average$month, 13)[13]), "%m"))]
+Ascent_previous_month <- month.name[as.numeric(format(as.Date(tail(Ascent_monthly_average$Date, 13)[12]), "%m"))]
+Ascent_current_month <- month.name[as.numeric(format(as.Date(tail(Ascent_monthly_average$Date, 13)[13]), "%m"))]
 
 ##Tables
 Ascent_change_table <- matrix(c(Ascent_previous_month,
@@ -400,9 +446,9 @@ rownames(Ascent_change_table) <- c("Month",
                                    "In person",
                                    "Online")
 
-Ascent_overview_table <- matrix(c(tail(Ascent$total, 1),
-                                  tail(Ascent$Ascent, 1),
-                                  tail(Ascent$Ascent_online, 1),
+Ascent_overview_table <- matrix(c(tail(Ascent_base$total, 1),
+                                  tail(Ascent_base$Ascent, 1),
+                                  tail(Ascent_base$Ascent_online, 1),
                                   tail(Ascent_monthly_average$total, 1),
                                   tail(Ascent_monthly_average$in.person, 1),
                                   tail(Ascent_monthly_average$online, 1),
@@ -428,35 +474,40 @@ rownames(Ascent_overview_table) <- c("Total",
                                      "In person",
                                      "Online")
 
-Ascent_in_person <- data.frame(Date = Ascent_monthly_average$month,
-                               attendance = Ascent_monthly_average$in.person)
+Ascent_in_person <- Ascent_monthly_average %>%
+        select(Date, in.person) %>%
+        rename(attendance = in.person)
 
-Ascent_online <- data.frame(Date = Ascent_monthly_average$month,
-                            attendance = Ascent_monthly_average$online)
+Ascent_online <- Ascent_monthly_average %>%
+        select(Date, online) %>%
+        rename(attendance = online) %>%
+        filter(Date >= "2017-12-01")
 
-Ascent_total <- data.frame(Date = Ascent_monthly_average$month,
-                           attendance = Ascent_monthly_average$total)
+Ascent_total <- Ascent_monthly_average %>%
+        select(Date, total) %>%
+        rename(attendance = total)
 
 # Calculations for the Sanctuary tab
 ##Base dataset
-Sanctuary <- Weekly_total %>%
+Sanctuary_base <- Weekly_total %>%
         select(Date, Second, SecondServe24) %>%
         rename(Sanctuary = Second, Sanctuary_online = SecondServe24) %>%
         group_by(Date) %>%
         mutate(total = sum(c(Sanctuary, Sanctuary_online), na.rm = TRUE)) %>%
-        mutate(total = replace(total, total == 0, NA)) %>%
-        arrange(Date)
+        mutate(total = replace(total, total == 0, NA))
 
 ##Weekly average per month
-Sanctuary_monthly_average <- Sanctuary %>%
-        group_by(month = floor_date(Date, "month")) %>%
+Sanctuary_monthly_average <- Sanctuary_base %>%
+        group_by(Date = floor_date(Date, "month")) %>%
         summarize(in.person = mean(Sanctuary, na.rm = TRUE),
                   online = mean(Sanctuary_online, na.rm = TRUE),
-                  total = mean(total, na.rm = TRUE)
-                  )
+                  total = mean(total, na.rm = TRUE)) %>%
+        mutate(Month = month(Date, label = TRUE),
+               Year = year(Date)) %>%
+        mutate(Era = ifelse(Date <= "2020-03-01", "Prepandemic", ifelse(Date > "2020-03-01" & Date < "2021-04-01", "Pandemic", "Postpandemic")))
 
 ##Weekly average per year
-Sanctuary_yearly_average <- Sanctuary %>%
+Sanctuary_yearly_average <- Sanctuary_base %>%
         group_by(year = floor_date(Date, "year")) %>%
         summarize(in.person = mean(Sanctuary, na.rm = TRUE),
                   online = mean(Sanctuary_online, na.rm = TRUE),
@@ -531,8 +582,8 @@ Sanctuary_online_current_month_percent_change <-
                 )
 
 ###Pull out monthly data
-Sanctuary_previous_month <- month.name[as.numeric(format(as.Date(tail(Sanctuary_monthly_average$month, 13)[12]), "%m"))]
-Sanctuary_current_month <- month.name[as.numeric(format(as.Date(tail(Sanctuary_monthly_average$month, 13)[13]), "%m"))]
+Sanctuary_previous_month <- month.name[as.numeric(format(as.Date(tail(Sanctuary_monthly_average$Date, 13)[12]), "%m"))]
+Sanctuary_current_month <- month.name[as.numeric(format(as.Date(tail(Sanctuary_monthly_average$Date, 13)[13]), "%m"))]
 
 ##Tables
 Sanctuary_change_table <- matrix(c(Sanctuary_previous_month,
@@ -572,9 +623,9 @@ rownames(Sanctuary_change_table) <- c("Month",
                                       "In person",
                                       "Online")
 
-Sanctuary_overview_table <- matrix(c(tail(Sanctuary$total, 1),
-                                     tail(Sanctuary$Sanctuary, 1),
-                                     tail(Sanctuary$Sanctuary_online, 1),
+Sanctuary_overview_table <- matrix(c(tail(Sanctuary_base$total, 1),
+                                     tail(Sanctuary_base$Sanctuary, 1),
+                                     tail(Sanctuary_base$Sanctuary_online, 1),
                                      tail(Sanctuary_monthly_average$total, 1),
                                      tail(Sanctuary_monthly_average$in.person, 1),
                                      tail(Sanctuary_monthly_average$online, 1),
@@ -601,15 +652,14 @@ rownames(Sanctuary_overview_table) <- c("Total",
                                         "In person",
                                         "Online")
 
-Sanctuary_in_person <- data.frame(Date = Sanctuary_monthly_average$month,
+Sanctuary_in_person <- data.frame(Date = Sanctuary_monthly_average$Date,
                                   attendance = Sanctuary_monthly_average$in.person)
 
-Sanctuary_online <- data.frame(Date = Sanctuary_monthly_average$month,
+Sanctuary_online <- data.frame(Date = Sanctuary_monthly_average$Date,
                                attendance = Sanctuary_monthly_average$online)
 
-Sanctuary_total <- data.frame(Date = Sanctuary_monthly_average$month,
+Sanctuary_total <- data.frame(Date = Sanctuary_monthly_average$Date,
                               attendance = Sanctuary_monthly_average$total)
-
 
 # Define UI for application that displays a table and graph
 ui <- fluidPage(
@@ -803,7 +853,7 @@ server <- function(input, output) {
         
         output$p <- renderPlotly({ 
                 data_set = data_reactive() %>%
-                        filter(month(Date) == time_period())
+                        filter(month(Date) %in% time_period())
                 
                 ggplot(data = data_set, aes(x = Date, y = attendance)) +
                         theme_classic() +
@@ -813,7 +863,7 @@ server <- function(input, output) {
                         labs(title = "Weekly average attendance by month",
                              x = "Date",
                              y = "Average attendance")
-        })        
+        })
 
 
         output$Ascent_overview_table <- renderTable(Ascent_overview_table, align = "c",
@@ -862,7 +912,7 @@ server <- function(input, output) {
         
         output$Ascent_plot <- renderPlotly({ 
             Ascent_data_set = Ascent_data_reactive() %>%
-                    filter(month(Date) == Ascent_time_period())
+                    filter(month(Date) %in% Ascent_time_period())
             
             ggplot(data = Ascent_data_set, aes(x = Date, y = attendance)) +
                     theme_classic() +
@@ -872,7 +922,8 @@ server <- function(input, output) {
                     labs(title = "Weekly average attendance by month",
                          x = "Date",
                          y = "Average attendance")
-    })
+            })
+        
         output$Sanctuary_overview_table <- renderTable(Sanctuary_overview_table, align = "c",
                                                        rownames = TRUE)
         
@@ -886,8 +937,7 @@ server <- function(input, output) {
                         Sanctuary_online
                 else
                         Sanctuary_total
-                }
-        )
+                })
         
         Sanctuary_time_period <- reactive({
                 if (input$Sanctuary_time == "jan")
@@ -920,7 +970,7 @@ server <- function(input, output) {
         
         output$Sanctuary_plot <- renderPlotly({ 
                 Sanctuary_data_set = Sanctuary_data_reactive() %>%
-                        filter(month(Date) == Sanctuary_time_period())
+                        filter(month(Date) %in% Sanctuary_time_period())
                 
                 ggplot(data = Sanctuary_data_set, aes(x = Date, y = attendance)) +
                         theme_classic() +
@@ -930,8 +980,7 @@ server <- function(input, output) {
                         labs(title = "Weekly average attendance by month",
                              x = "Date",
                              y = "Average attendance")
-                }
-        )  
+                })
 }
 
 shinyApp(ui = ui, server = server)
