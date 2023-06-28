@@ -16,166 +16,170 @@
 
 library(shiny)
 library(tidyverse)
-library(lubridate)
 library(scales)
 library(timetk)
 library(plotly)
-library(bbplot)
 library(knitr)
-library(googlesheets4)
 
-# Loading the data
-source("source_data.R")
+# Loading data and analysis results
 source("main_tab.R")
 source("Ascent_tab.R")
 source("Sanctuary_tab.R")
 
 # Define UI for application
 ui <- fluidPage(
-
-    # Application title
-    titlePanel("Kettering SDA Church Attendance"),
-    tabsetPanel(
-
-    # Sidebar with a menu input for data set displayed on the graph
-    tabPanel(
-            "Overall",
-            sidebarLayout(
-                    sidebarPanel(
-                            selectInput("dataset", 
-                                        label = h3("Attendance data set"),
-                                        choices = list("Combined" = "combined",
-                                                       "In Person" = "in_person",
-                                                       "Online" = "online"),
-                                        selected = combined),
-                            p("There are three data sets to choose from: In-person attendance, online audience, and combined in-person + online. The default view is the combined data set."),
-                            
-                            selectInput("time", 
-                                        label = h3("Month"),
-                                        choices = list("All" = "all_months",
-                                                       "January" = "jan",
-                                                       "February" = "feb",
-                                                       "March" = "mar",
-                                                       "April" = "apr",
-                                                       "May" = "may",
-                                                       "June" = "jun",
-                                                       "July" = "jul",
-                                                       "August" = "aug",
-                                                       "September" = "sept",
-                                                       "October" = "oct",
-                                                       "November" = "nov",
-                                                       "December" = "dec"),
-                                        selected = "all_months"),
-                            p("Select the month to display on the graph")
-                    ),
-                    
-                    mainPanel(
-                            h3("By the Numbers"),
-                            h4("Current Attendance per week"),
-                            tableOutput("latest"),
-                            h3("Year-over-year change from the same month last year"),
-                            tableOutput("total_change_table"),
-                            h3("Attendance Over Time"),
-                            plotlyOutput("p")
-                            )
-                    )
-            ),
-    
-    tabPanel(
-            "Ascent",
-            sidebarLayout(
-                    sidebarPanel(
-                            selectInput("Ascent_dataset", 
-                                        label = h3("Attendance data set"),
-                                        choices = list("Total" = "Ascent_total",
-                                                       "In Person" = "Ascent_in_person",
-                                                       "Online" = "Ascent_online"),
-                                        selected = Ascent_total),
-                            p("There are three data sets to choose from: In-person attendance, online audience, and total attendance. The default view is total attendance."),
-                            
-                            selectInput("Ascent_time", 
-                                        label = h3("Month"),
-                                        choices = list("All" = "all_months",
-                                                       "January" = "jan",
-                                                       "February" = "feb",
-                                                       "March" = "mar",
-                                                       "April" = "apr",
-                                                       "May" = "may",
-                                                       "June" = "jun",
-                                                       "July" = "jul",
-                                                       "August" = "aug",
-                                                       "September" = "sept",
-                                                       "October" = "oct",
-                                                       "November" = "nov",
-                                                       "December" = "dec"),
-                                        selected = "all_months"),
-                            p("Select the month to display on the graph")
-                    ),
-                    
-                    mainPanel(
-                            h3("By the Numbers"),
-                            h4("Current Attendance per week"),
-                            tableOutput("Ascent_overview_table"),
-                            h4("Year-over-year change from the same month last year"),
-                            tableOutput("Ascent_change_table"),
-                            h3("Attendance Over Time"),
-                            plotlyOutput("Ascent_plot")
-                            )
-                    )
-            ),
-    
-    tabPanel(
-            "Sanctuary",
-            sidebarLayout(
-                    sidebarPanel(
-                            selectInput("Sanctuary_dataset", 
-                                        label = h3("Attendance data set"),
-                                        choices = list("Total" = "Sanctuary_total",
-                                                       "In Person" = "Sanctuary_in_person",
-                                                       "Online" = "Sanctuary_online"),
-                                        selected = Sanctuary_total),
-                            p("There are three data sets to choose from: In-person attendance, online audience, and total attendance. The default view is total attendance."),
-                            
-                            selectInput("Sanctuary_time", 
-                                        label = h3("Month"),
-                                        choices = list("All" = "all_months",
-                                                       "January" = "jan",
-                                                       "February" = "feb",
-                                                       "March" = "mar",
-                                                       "April" = "apr",
-                                                       "May" = "may",
-                                                       "June" = "jun",
-                                                       "July" = "jul",
-                                                       "August" = "aug",
-                                                       "September" = "sept",
-                                                       "October" = "oct",
-                                                       "November" = "nov",
-                                                       "December" = "dec"),
-                                        selected = "all_months"),
-                            p("Select the month to display on the graph")
-                    ),
-                    mainPanel(
-                            h3("By the Numbers"),
-                            h4("Current attendance per week"),
-                            tableOutput("Sanctuary_overview_table"),
-                            h4("Year-over-year change from the same month last year"),
-                            tableOutput("Sanctuary_change_table"),
-                            h3("Attendance Over Time"),
-                            plotlyOutput("Sanctuary_plot")
-                            )
-                    )
-            )
-    ),
-    
-    hr(),
-    h4("Created by: Jim Milks"),
-    "Version 3.0",
-    br(),
-    "Code and data available at:", 
-    a(href = "https://github.com/jrmilks74/KetSDA/tree/main", "https://github.com/jrmilks74/KetSDA/tree/main"),
-    br(),
-    "Data updated every Monday"
-    )
+        
+        # Application title
+        titlePanel("Kettering SDA Church Attendance"),
+        tabsetPanel(
+                
+                # Sidebar with a menu input for data set displayed on the graph
+                tabPanel(
+                        "Overall",
+                        sidebarLayout(
+                                sidebarPanel(
+                                        selectInput("dataset", 
+                                                    label = h3("Attendance data set"),
+                                                    choices = list("Combined" = "combined",
+                                                                   "In Person" = "in_person",
+                                                                   "Online" = "online"),
+                                                    selected = combined),
+                                        p("There are three data sets to choose from: In-person attendance, online audience, and combined in-person + online. The default view is the combined data set."),
+                                        
+                                        selectInput("time", 
+                                                    label = h3("Month"),
+                                                    choices = list("All" = "all_months",
+                                                                   "January" = "jan",
+                                                                   "February" = "feb",
+                                                                   "March" = "mar",
+                                                                   "April" = "apr",
+                                                                   "May" = "may",
+                                                                   "June" = "jun",
+                                                                   "July" = "jul",
+                                                                   "August" = "aug",
+                                                                   "September" = "sept",
+                                                                   "October" = "oct",
+                                                                   "November" = "nov",
+                                                                   "December" = "dec"),
+                                                    selected = "all_months"),
+                                        p("Select the month to display on the graph")
+                                ),
+                                
+                                mainPanel(
+                                        h3("By the Numbers"),
+                                        h4("Current Attendance per week"),
+                                        tableOutput("latest"),
+                                        h3("Year-over-year change from the same month last year"),
+                                        tableOutput("total_change_table"),
+                                        h3("Attendance Over Time"),
+                                        plotlyOutput("p"),
+                                        h3("Seasonal attendance patterns"),
+                                        plotlyOutput("s")
+                                )
+                        )
+                ),
+                
+                tabPanel(
+                        "Ascent",
+                        sidebarLayout(
+                                sidebarPanel(
+                                        selectInput("Ascent_dataset", 
+                                                    label = h3("Attendance data set"),
+                                                    choices = list("Total" = "Ascent_total",
+                                                                   "In Person" = "Ascent_in_person",
+                                                                   "Online" = "Ascent_online"),
+                                                    selected = Ascent_total),
+                                        p("There are three data sets to choose from: In-person attendance, online audience, and total attendance. The default view is total attendance."),
+                                        
+                                        selectInput("Ascent_time", 
+                                                    label = h3("Month"),
+                                                    choices = list("All" = "all_months",
+                                                                   "January" = "jan",
+                                                                   "February" = "feb",
+                                                                   "March" = "mar",
+                                                                   "April" = "apr",
+                                                                   "May" = "may",
+                                                                   "June" = "jun",
+                                                                   "July" = "jul",
+                                                                   "August" = "aug",
+                                                                   "September" = "sept",
+                                                                   "October" = "oct",
+                                                                   "November" = "nov",
+                                                                   "December" = "dec"),
+                                                    selected = "all_months"),
+                                        p("Select the month to display on the graph")
+                                ),
+                                
+                                mainPanel(
+                                        h3("By the Numbers"),
+                                        h4("Current Attendance per week"),
+                                        tableOutput("Ascent_overview_table"),
+                                        h4("Year-over-year change from the same month last year"),
+                                        tableOutput("Ascent_change_table"),
+                                        h3("Attendance Over Time"),
+                                        plotlyOutput("Ascent_plot"),
+                                        h3("Seasonal attendance patterns"),
+                                        plotlyOutput("Ascent_s")
+                                )
+                        )
+                ),
+                
+                tabPanel(
+                        "Sanctuary",
+                        sidebarLayout(
+                                sidebarPanel(
+                                        selectInput("Sanctuary_dataset", 
+                                                    label = h3("Attendance data set"),
+                                                    choices = list("Total" = "Sanctuary_total",
+                                                                   "In Person" = "Sanctuary_in_person",
+                                                                   "Online" = "Sanctuary_online"),
+                                                    selected = Sanctuary_total),
+                                        p("There are three data sets to choose from: In-person attendance, online audience, and total attendance. The default view is total attendance."),
+                                        
+                                        selectInput("Sanctuary_time", 
+                                                    label = h3("Month"),
+                                                    choices = list("All" = "all_months",
+                                                                   "January" = "jan",
+                                                                   "February" = "feb",
+                                                                   "March" = "mar",
+                                                                   "April" = "apr",
+                                                                   "May" = "may",
+                                                                   "June" = "jun",
+                                                                   "July" = "jul",
+                                                                   "August" = "aug",
+                                                                   "September" = "sept",
+                                                                   "October" = "oct",
+                                                                   "November" = "nov",
+                                                                   "December" = "dec"),
+                                                    selected = "all_months"),
+                                        p("Select the month to display on the graph")
+                                ),
+                                mainPanel(
+                                        h3("By the Numbers"),
+                                        h4("Current attendance per week"),
+                                        tableOutput("Sanctuary_overview_table"),
+                                        h4("Year-over-year change from the same month last year"),
+                                        tableOutput("Sanctuary_change_table"),
+                                        h3("Attendance Over Time"),
+                                        plotlyOutput("Sanctuary_plot"),
+                                        h3("Seasonal attendance patterns"),
+                                        plotlyOutput("Sanctuary_s")
+                                )
+                        )
+                )
+        ),
+        
+        hr(),
+        h4("Created by: Jim Milks"),
+        "Version 4.0",
+        br(),
+        "28 June 2023",
+        br(),
+        "Code and data available at:", 
+        a(href = "https://github.com/jrmilks74/KetSDA/tree/main", "https://github.com/jrmilks74/KetSDA/tree/main"),
+        br(),
+        "Data updated every Monday"
+)
 
 # Define server logic required to render the table and time series plot
 server <- function(input, output) {
@@ -222,7 +226,7 @@ server <- function(input, output) {
         
         output$p <- renderPlotly({ 
                 data_set = data_reactive() %>%
-                        filter(month(Date) %in% time_period())
+                        filter(lubridate::month(Date) %in% time_period())
                 
                 ggplot(data = data_set, aes(x = Date, y = attendance)) +
                         theme_classic() +
@@ -233,8 +237,27 @@ server <- function(input, output) {
                              x = "Date",
                              y = "Average attendance")
         })
-
-
+        
+        output$s <- renderPlotly({
+                        this_year <- year(tail(Combined_yearly$Date)[6])
+                        previous_year <- year(tail(Combined_yearly$Date)[5])
+                        data_set = data_reactive()
+                        
+                        s <- data_set %>%
+                                mutate(Year = factor(year(Date)),
+                                       Date = update(Date, year = 1)) %>%
+                                ggplot(aes(x = Date, y = attendance, colour = Year)) +
+                                scale_x_date(date_breaks = "1 month", date_labels = "%b") +
+                                geom_line(aes(group = Year), colour = "black", alpha = 0.1) +
+                                geom_line(data = function(x) filter(x, Year == previous_year), lwd = 0.5) +
+                                geom_line(data = function(x) filter(x, Year == this_year), lwd = 1) +
+                                theme_bw() +
+                                labs(y = "Average attendance per week",
+                                     x = "Month")
+                        ggplotly(s)
+        })
+        
+        
         output$Ascent_overview_table <- renderTable(Ascent_overview_table, align = "c",
                                                     rownames = TRUE)
         
@@ -280,18 +303,37 @@ server <- function(input, output) {
         })
         
         output$Ascent_plot <- renderPlotly({ 
-            Ascent_data_set = Ascent_data_reactive() %>%
-                    filter(month(Date) %in% Ascent_time_period())
-            
-            ggplot(data = Ascent_data_set, aes(x = Date, y = attendance)) +
-                    theme_classic() +
-                    geom_point() +
-                    geom_line() +
-                    geom_smooth(method = "loess", formula = "y~x", col = "red") +
-                    labs(title = "Weekly average attendance by month",
-                         x = "Date",
-                         y = "Average attendance")
-            })
+                Ascent_data_set = Ascent_data_reactive() %>%
+                        filter(lubridate::month(Date) %in% Ascent_time_period())
+                
+                ggplot(data = Ascent_data_set, aes(x = Date, y = attendance)) +
+                        theme_classic() +
+                        geom_point() +
+                        geom_line() +
+                        geom_smooth(method = "loess", formula = "y~x", col = "red") +
+                        labs(title = "Weekly average attendance by month",
+                             x = "Date",
+                             y = "Average attendance")
+        })
+        
+        output$Ascent_s <- renderPlotly({
+                this_year <- year(tail(Combined_yearly$Date)[6])
+                previous_year <- year(tail(Combined_yearly$Date)[5])
+                Ascent_data_set = Ascent_data_reactive()
+                
+                Ascent_s <- Ascent_data_set %>%
+                        mutate(Year = factor(year(Date)),
+                               Date = update(Date, year = 1)) %>%
+                        ggplot(aes(x = Date, y = attendance, colour = Year)) +
+                        scale_x_date(date_breaks = "1 month", date_labels = "%b") +
+                        geom_line(aes(group = Year), colour = "black", alpha = 0.1) +
+                        geom_line(data = function(x) filter(x, Year == previous_year), lwd = 0.5) +
+                        geom_line(data = function(x) filter(x, Year == this_year), lwd = 1) +
+                        theme_bw() +
+                        labs(y = "Average attendance per week",
+                             x = "Month")
+                ggplotly(Ascent_s)
+        })
         
         output$Sanctuary_overview_table <- renderTable(Sanctuary_overview_table, align = "c",
                                                        rownames = TRUE)
@@ -306,7 +348,7 @@ server <- function(input, output) {
                         Sanctuary_online
                 else
                         Sanctuary_total
-                })
+        })
         
         Sanctuary_time_period <- reactive({
                 if (input$Sanctuary_time == "jan")
@@ -339,7 +381,7 @@ server <- function(input, output) {
         
         output$Sanctuary_plot <- renderPlotly({ 
                 Sanctuary_data_set = Sanctuary_data_reactive() %>%
-                        filter(month(Date) %in% Sanctuary_time_period())
+                        filter(lubridate::month(Date) %in% Sanctuary_time_period())
                 
                 ggplot(data = Sanctuary_data_set, aes(x = Date, y = attendance)) +
                         theme_classic() +
@@ -349,7 +391,26 @@ server <- function(input, output) {
                         labs(title = "Weekly average attendance by month",
                              x = "Date",
                              y = "Average attendance")
-                })
+        })
+        
+        output$Sanctuary_s <- renderPlotly({
+                this_year <- year(tail(Combined_yearly$Date)[6])
+                previous_year <- year(tail(Combined_yearly$Date)[5])
+                Sanctuary_data_set = Sanctuary_data_reactive()
+                
+                Sanctuary_s <- Sanctuary_data_set %>%
+                        mutate(Year = factor(year(Date)),
+                               Date = update(Date, year = 1)) %>%
+                        ggplot(aes(x = Date, y = attendance, colour = Year)) +
+                        scale_x_date(date_breaks = "1 month", date_labels = "%b") +
+                        geom_line(aes(group = Year), colour = "black", alpha = 0.1) +
+                        geom_line(data = function(x) filter(x, Year == previous_year), lwd = 0.5) +
+                        geom_line(data = function(x) filter(x, Year == this_year), lwd = 1) +
+                        theme_bw() +
+                        labs(y = "Average attendance per week",
+                             x = "Month")
+                ggplotly(Sanctuary_s)
+        })
 }
 
 shinyApp(ui = ui, server = server)

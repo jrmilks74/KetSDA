@@ -1,5 +1,4 @@
 library(tidyverse)
-library(lubridate)
 library(scales)
 library(timetk)
 library(knitr)
@@ -20,10 +19,7 @@ Sanctuary_monthly_average <- Sanctuary_base %>%
         group_by(Date = floor_date(Date, "month")) %>%
         summarize(in.person = mean(Sanctuary, na.rm = TRUE),
                   online = mean(Sanctuary_online, na.rm = TRUE),
-                  total = mean(total, na.rm = TRUE)) %>%
-        mutate(Month = month(Date, label = TRUE),
-               Year = year(Date)) %>%
-        mutate(Era = ifelse(Date <= "2020-03-01", "Prepandemic", ifelse(Date > "2020-03-01" & Date < "2021-04-01", "Pandemic", "Postpandemic")))
+                  total = mean(total, na.rm = TRUE))
 
 ##Weekly average per year
 Sanctuary_yearly_average <- Sanctuary_base %>%

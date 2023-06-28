@@ -1,10 +1,8 @@
 #Load data
 
 library(tidyverse)
-library(lubridate)
 library(scales)
 library(timetk)
-library(knitr)
 library(googlesheets4)
 
 options(
@@ -43,10 +41,7 @@ base_data_set <- Weekly_total %>%
                   Sanctuary_online = mean(Sanctuary_online, na.rm = TRUE),
                   In_person = mean(In_person, na.rm = TRUE),
                   Online = mean(Online, na.rm = TRUE),
-                  Total = mean(Total, na.rm = TRUE)) %>%
-        mutate(Month = month(Date, label = TRUE),
-               Year = year(Date)) %>%
-        mutate(Era = ifelse(Date <= "2020-03-01", "Prepandemic", ifelse(Date > "2020-03-01" & Date < "2021-04-01", "Pandemic", "Postpandemic")))
+                  Total = mean(Total, na.rm = TRUE))
 
 ###Read in older attendance data
 Monthly_average <- read_sheet("https://docs.google.com/spreadsheets/d/1DUtoxOBcbZaLovhMUrzyTBtkb8ZqvIveMMMu-eAQMns/edit#gid=0",

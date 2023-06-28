@@ -1,8 +1,6 @@
 library(tidyverse)
-library(lubridate)
 library(scales)
 library(timetk)
-library(knitr)
 
 source("source_data.R")
 
