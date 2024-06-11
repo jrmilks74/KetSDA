@@ -5,177 +5,168 @@ library(knitr)
 
 source("source_data.R")
 
-# Calculations for the Sanctuary tab
-##Base dataset
-Sanctuary_base <- Weekly_total %>%
-        select(Date, Second, SecondServe24) %>%
-        rename(Sanctuary = Second, Sanctuary_online = SecondServe24) %>%
-        group_by(Date) %>%
-        mutate(total = sum(c(Sanctuary, Sanctuary_online), na.rm = TRUE)) %>%
-        mutate(total = replace(total, total == 0, NA))
+# Calculations for the Ascent tab
+### Create the base data set
+Sanctuary_base <- Weekly_data |>
+        select(Date,
+               Total_Sanctuary,
+               Sanctuary, 
+               SanctuaryOnline) |>
+        rename(Total = Total_Sanctuary,
+               In_person = Sanctuary,
+               Online = SanctuaryOnline)
 
-##Weekly average per month
-Sanctuary_monthly_average <- Sanctuary_base %>%
-        group_by(Date = floor_date(Date, "month")) %>%
-        summarize(in.person = mean(Sanctuary, na.rm = TRUE),
-                  online = mean(Sanctuary_online, na.rm = TRUE),
-                  total = mean(total, na.rm = TRUE))
+# Sanctuary Main Table
+Sanctuary_Last_week <- tail(Sanctuary_base, 1) |>
+        select(Total,
+               In_person,
+               Online)
 
-##Weekly average per year
-Sanctuary_yearly_average <- Sanctuary_base %>%
-        group_by(year = floor_date(Date, "year")) %>%
-        summarize(in.person = mean(Sanctuary, na.rm = TRUE),
-                  online = mean(Sanctuary_online, na.rm = TRUE),
-                  total = mean(total, na.rm = TRUE)
-        )
+# Weekly mean month-to-date for current month
+Sanctuary_Month_To_Date <- Sanctuary_base |>
+        select(Date,
+               Total,
+               In_person,
+               Online) |>
+        group_by(floor_date(Date, "month")) |>
+        summarize(In_person = round(mean(In_person, na.rm = TRUE), 2),
+                  Online = round(mean(Online, na.rm = TRUE), 2),
+                  Total = round(mean(Total, na.rm = TRUE), 2)) |>
+        filter(row_number() == n())
 
-##Total and percent changes
-Sanctuary_combined_last_month_change <-
-        tail(Sanctuary_monthly_average$total, 14)[13] - 
-        tail(Sanctuary_monthly_average$total, 14)[1]
+# Calculate the weekly average for the same month the previous year
+Sanctuary_Year_over_year <- Sanctuary_base |>
+        select(Date,
+               In_person,
+               Online,
+               Total) |>
+        group_by(floor_date(Date, "month")) |>
+        summarize(In_person = round(mean(In_person, na.rm = TRUE), 2),
+                  Online = round(mean(Online, na.rm = TRUE), 2),
+                  Total = round(mean(Total, na.rm = TRUE), 2)) |>
+        slice_tail(n = 13) |>
+        slice_head(n = 1)
 
-Sanctuary_combined_last_month_percent_change <-
-        percent(((tail(Sanctuary_monthly_average$total, 14)[13] -
-                          tail(Sanctuary_monthly_average$total, 14)[1])
-                 /
-                         tail(Sanctuary_monthly_average$total, 14)[1])
-        )
+# Absolute year-over-year change and percent change
+Sanctuary_YoY_Month <- data.frame(Total = round(Sanctuary_Month_To_Date$Total - Sanctuary_Year_over_year$Total, 1),
+                               In_person = round(Sanctuary_Month_To_Date$In_person - Sanctuary_Year_over_year$In_person, 1),
+                               Online = round(Sanctuary_Month_To_Date$Online - Sanctuary_Year_over_year$Online, 1))
+Sanctuary_YoY_Month <- Sanctuary_YoY_Month |>
+        mutate(Total_percent = Sanctuary_YoY_Month$Total / Sanctuary_Year_over_year$Total,
+               In_person_percent = Sanctuary_YoY_Month$In_person / Sanctuary_Year_over_year$In_person,
+               Online_percent = Sanctuary_YoY_Month$Online / Sanctuary_Year_over_year$Online)
 
-Sanctuary_in_person_last_month_change <-
-        tail(Sanctuary_monthly_average$in.person, 14)[13] -
-        tail(Sanctuary_monthly_average$in.person, 14)[1]
+# Year-to-date averages for current and past year
+Sanctuary_By_week <- Weekly_data |>
+        mutate(Year = year(Date)) |>
+        mutate(Month = month(Date, label = TRUE))
 
-Sanctuary_in_person_last_month_percent_change <-
-        percent(((tail(Sanctuary_monthly_average$in.person, 14)[13] -
-                          tail(Sanctuary_monthly_average$in.person, 14)[1])
-                 /
-                         tail(Sanctuary_monthly_average$in.person, 14)[1])
-        )
+Sanctuary_End_week <- tail(Sanctuary_By_week$Week, 1)
+Sanctuary_Current_year <- tail(Sanctuary_By_week$Year, 1)
+Sanctuary_Previous_year <- Sanctuary_Current_year - 1
+Sanctuary_Current_month <- tail(Sanctuary_By_week$Month, 1)
 
-Sanctuary_online_last_month_change <-
-        tail(Sanctuary_monthly_average$online, 14)[13] -
-        tail(Sanctuary_monthly_average$online, 14)[1]
+Sanctuary_Attendance_past_year <- subset(Sanctuary_By_week, Year == Previous_year & Week <= End_week)
+Sanctuary_Attendance_current_year <- subset(Sanctuary_By_week, Year == Sanctuary_Current_year)
 
-Sanctuary_online_last_month_percent_change <-
-        percent(((tail(Sanctuary_monthly_average$online, 14)[13] -
-                          tail(Sanctuary_monthly_average$online, 14)[1])
-                 /
-                         tail(Sanctuary_monthly_average$online, 14)[1])
-        )
+Sanctuary_Weekly_ave_past_year <- Sanctuary_Attendance_past_year |>
+        group_by(Year) |>
+        summarise(Total = round(mean(Total_Sanctuary), 1),
+                  In_person = round(mean(Sanctuary), 1),
+                  Online = round(mean(SanctuaryOnline), 1))
 
-Sanctuary_combined_current_month_change <-
-        tail(Sanctuary_monthly_average$total, 13)[13] -
-        tail(Sanctuary_monthly_average$total, 13)[1]
+Sanctuary_Weekly_ave_current_year <- Sanctuary_Attendance_current_year |>
+        group_by(Year) |>
+        summarise(Total = round(mean(Total_Sanctuary), 2),
+                  In_person = round(mean(Sanctuary), 2),
+                  Online = round(mean(SanctuaryOnline), 2))
 
-Sanctuary_combined_current_month_percent_change <-
-        percent(((tail(Sanctuary_monthly_average$total, 13)[13] -
-                          tail(Sanctuary_monthly_average$total, 13)[1])
-                 /
-                         tail(Sanctuary_monthly_average$total, 13)[1])
-        )
-
-Sanctuary_in_person_current_month_change <-
-        tail(Sanctuary_monthly_average$in.person, 13)[13] -
-        tail(Sanctuary_monthly_average$in.person, 13)[1]
-
-Sanctuary_in_person_current_month_percent_change <-
-        percent(((tail(Sanctuary_monthly_average$in.person, 13)[13] -
-                          tail(Sanctuary_monthly_average$in.person, 13)[1])
-                 /
-                         tail(Sanctuary_monthly_average$in.person, 13)[1])
-        )
-
-Sanctuary_online_current_month_change <-
-        tail(Sanctuary_monthly_average$online, 13)[13] -
-        tail(Sanctuary_monthly_average$online, 13)[1]
-
-Sanctuary_online_current_month_percent_change <- 
-        percent(((tail(Sanctuary_monthly_average$online, 13)[13] -
-                          tail(Sanctuary_monthly_average$online, 13)[1])
-                 /
-                         tail(Sanctuary_monthly_average$online, 13)[1])
-        )
-
-###Pull out monthly data
-Sanctuary_previous_month <- month.name[as.numeric(format(as.Date(tail(Sanctuary_monthly_average$Date, 13)[12]), "%m"))]
-Sanctuary_current_month <- month.name[as.numeric(format(as.Date(tail(Sanctuary_monthly_average$Date, 13)[13]), "%m"))]
-
-##Tables
-Sanctuary_change_table <- matrix(c(Sanctuary_previous_month,
-                                   format(round(Sanctuary_combined_last_month_change, 1),
-                                          nsmall = 1),
-                                   format(round(Sanctuary_in_person_last_month_change, 1),
-                                          nsmall = 1),
-                                   format(round(Sanctuary_online_last_month_change, 1),
-                                          nsmall = 1),
-                                   Sanctuary_previous_month,
-                                   Sanctuary_combined_last_month_percent_change,
-                                   Sanctuary_in_person_last_month_percent_change,
-                                   Sanctuary_online_last_month_percent_change,
-                                   Sanctuary_current_month,
-                                   format(round(Sanctuary_combined_current_month_change, 1),
-                                          nsmall = 1),
-                                   format(round(Sanctuary_in_person_current_month_change, 1),
-                                          nsmall = 1),
-                                   format(round(Sanctuary_online_current_month_change, 1),
-                                          nsmall = 1),
-                                   Sanctuary_current_month,
-                                   Sanctuary_combined_current_month_percent_change,
-                                   Sanctuary_in_person_current_month_percent_change,
-                                   Sanctuary_online_current_month_percent_change
-),
-ncol = 4,
-byrow = FALSE
+# Sanctuary summary table
+Sanctuary_main_table <- matrix(c(
+        Sanctuary_Last_week$Total,
+        Sanctuary_Last_week$In_person,
+        Sanctuary_Last_week$Online,
+        Sanctuary_Month_To_Date$Total,
+        Sanctuary_Month_To_Date$In_person,
+        Sanctuary_Month_To_Date$Online,
+        Sanctuary_Year_over_year$Total,
+        Sanctuary_Year_over_year$In_person,
+        Sanctuary_Year_over_year$Online,
+        Sanctuary_YoY_Month$Total,
+        Sanctuary_YoY_Month$In_person,
+        Sanctuary_YoY_Month$Online,
+        label_percent(accuracy = 0.1)(Sanctuary_YoY_Month$Total_percent),
+        label_percent(accuracy = 0.1)(Sanctuary_YoY_Month$In_person_percent),
+        label_percent(accuracy = 0.1)(Sanctuary_YoY_Month$Online_percent)),
+        ncol = 5,
+        byrow = FALSE
 )
 
-colnames(Sanctuary_change_table) <- c("Total change",
-                                      "Percent change",
-                                      "Total change",
-                                      "Percent change")
+colnames(Sanctuary_main_table) <- c("Last week",
+                                 paste(Sanctuary_Current_month, Sanctuary_Current_year, sep = " "),
+                                 paste(Sanctuary_Current_month, Sanctuary_Previous_year, sep = " "),
+                                 "Change",
+                                 "Percent change")
 
-rownames(Sanctuary_change_table) <- c("Month",
-                                      "Combined",
-                                      "In person",
-                                      "Online")
+rownames(Sanctuary_main_table) <- c("Combined",
+                                 "In person",
+                                 "Online")
 
-Sanctuary_overview_table <- matrix(c(tail(Sanctuary_base$total, 1),
-                                     tail(Sanctuary_base$Sanctuary, 1),
-                                     tail(Sanctuary_base$Sanctuary_online, 1),
-                                     tail(Sanctuary_monthly_average$total, 1),
-                                     tail(Sanctuary_monthly_average$in.person, 1),
-                                     tail(Sanctuary_monthly_average$online, 1),
-                                     tail(Sanctuary_monthly_average$total, 2)[1],
-                                     tail(Sanctuary_monthly_average$in.person, 2)[1],
-                                     tail(Sanctuary_monthly_average$online, 2)[1],
-                                     tail(Sanctuary_yearly_average$total, 1),
-                                     tail(Sanctuary_yearly_average$in.person, 1),
-                                     tail(Sanctuary_yearly_average$online, 1),
-                                     tail(Sanctuary_yearly_average$total, 2)[1],
-                                     tail(Sanctuary_yearly_average$in.person, 2)[1],
-                                     tail(Sanctuary_yearly_average$online, 2)[1]),
-                                   ncol = 5,
-                                   byrow = FALSE
+# Year-to-date averages, absolute change, and percent change table
+Sanctuary_ytd_change <- data.frame(Total = Sanctuary_Weekly_ave_current_year$Total - Sanctuary_Weekly_ave_past_year$Total,
+                                In_person = Sanctuary_Weekly_ave_current_year$In_person - Sanctuary_Weekly_ave_past_year$In_person,
+                                Online = Sanctuary_Weekly_ave_current_year$Online - Sanctuary_Weekly_ave_past_year$Online)
+
+Sanctuary_ytd_change <- Sanctuary_ytd_change |>
+        mutate(Total_percent = Sanctuary_ytd_change$Total / Sanctuary_Weekly_ave_past_year$Total,
+               In_person_percent = Sanctuary_ytd_change$In_person / Sanctuary_Weekly_ave_past_year$In_person,
+               Online_percent = Sanctuary_ytd_change$Online / Sanctuary_Weekly_ave_past_year$Online)
+
+Sanctuary_ytd_table <- matrix(c(Sanctuary_Weekly_ave_current_year$Total,
+                                Sanctuary_Weekly_ave_current_year$In_person,
+                                Sanctuary_Weekly_ave_current_year$Online,
+                                Sanctuary_Weekly_ave_past_year$Total,
+                                Sanctuary_Weekly_ave_past_year$In_person,
+                                Sanctuary_Weekly_ave_past_year$Online,
+                             round(Sanctuary_ytd_change$Total, 1),
+                             round(Sanctuary_ytd_change$In_person, 1),
+                             round(Sanctuary_ytd_change$Online, 1),
+                             label_percent(accuracy = 0.1)(Sanctuary_ytd_change$Total_percent),
+                             label_percent(accuracy = 0.1)(Sanctuary_ytd_change$In_person_percent),
+                             label_percent(accuracy = 0.1)(Sanctuary_ytd_change$Online_percent)),
+                           ncol = 4,
+                           byrow = FALSE
+                           
 )
 
-colnames(Sanctuary_overview_table) <- c("Last week",
-                                        "Current Month-to-date",
-                                        "Previous Month Average",
-                                        "Current Year-to-date",
-                                        "Previous Year Average")
+colnames(Sanctuary_ytd_table) <- c(paste(Current_year),
+                                paste(Previous_year),
+                                "Change",
+                                "Percent change")
 
-rownames(Sanctuary_overview_table) <- c("Total",
-                                        "In person",
-                                        "Online")
+rownames(Sanctuary_ytd_table) <- c("Combined",
+                                "In person",
+                                "Online")
 
-Sanctuary_in_person <- Sanctuary_monthly_average %>%
-        select(Date, in.person) %>%
-        rename(attendance = in.person)
 
-Sanctuary_online <- Sanctuary_monthly_average %>%
-        select(Date, online) %>%
-        rename(attendance = online) %>%
-        filter(Date >= "2017-12-01")
+# Data sets for reactive selection
+## Sanctuary in person
+Sanctuary_in_person <- Sanctuary_base |>
+        select(Date,
+               In_person) |>
+        group_by(Date = floor_date(Date, "month")) |>
+        summarize(attendance = round(mean(In_person, na.rm = TRUE), 2))
 
-Sanctuary_total <- Sanctuary_monthly_average %>%
-        select(Date, total) %>%
-        rename(attendance = total)
+## Sanctuary online
+Sanctuary_online <- Sanctuary_base |>
+        select(Date,
+               Online) |>
+        group_by(Date = floor_date(Date, "month")) |>
+        summarize(attendance = round(mean(Online, na.rm = TRUE), 2))
+
+## Sanctuary combined attendance
+Sanctuary_total <- Sanctuary_base |>
+        select(Date,
+               Total) |>
+        group_by(Date = floor_date(Date, "month")) |>
+        summarise(attendance = round(mean(Total, na.rm = TRUE), 2))

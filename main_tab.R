@@ -4,235 +4,159 @@ library(timetk)
 
 source("source_data.R")
 
-#Calculations for the main tab
+# Calculations for the main tab
 
-###Combine the older and the recent attendance data into one
-in_person_alone <- base_data_set %>%
-        select(Date, In_person) %>%
-        rename(attendance = In_person)
+### Main table calculations
+# Get last week's attendance numbers
+Last_week <- tail(Weekly_data, 1) |>
+        select(In_person,
+               Online,
+               Total)
 
-in_person_full_data <- rbind(Monthly_average, in_person_alone)
+# Calculate the month-to-date weekly average for the current month
+Month_to_date <- Weekly_data |>
+        select(Date,
+               In_person,
+               Online,
+               Total) |>
+        group_by(floor_date(Date, "month")) |>
+        summarize(In_person = round(mean(In_person, na.rm = TRUE), 2),
+                  Online = round(mean(Online, na.rm = TRUE), 2),
+                  Total = round(mean(Total, na.rm = TRUE), 2)) |>
+        filter(row_number() == n())
 
-##Create weekly mean per month online viewership
-online <- base_data_set %>%
-        select(Date, Online) %>%
-        rename(attendance = Online) %>%
-        filter(Date >= "2017-12-01")
+# Calculate the weekly average for the same month the previous year
+Year_over_year <- Weekly_data |>
+        select(Date,
+               In_person,
+               Online,
+               Total) |>
+        group_by(floor_date(Date, "month")) |>
+        summarize(In_person = round(mean(In_person, na.rm = TRUE), 2),
+                  Online = round(mean(Online, na.rm = TRUE), 2),
+                  Total = round(mean(Total, na.rm = TRUE), 2)) |>
+        slice_tail(n = 13) |>
+        slice_head(n = 1)
 
-##Create weekly mean per month total attendance
-combined_part <- base_data_set %>%
-        select(Date, Total) %>%
-        rename(attendance = Total)
+# Absolute year-over-year change and percent change
+YoY_Month <- data.frame(Total = round(Month_to_date$Total - Year_over_year$Total, 1),
+                        In_person = round(Month_to_date$In_person - Year_over_year$In_person, 1),
+                        Online = round(Month_to_date$Online - Year_over_year$Online, 1))
+YoY_Month <- YoY_Month |>
+        mutate(Total_percent = YoY_Month$Total / Year_over_year$Total,
+               In_person_percent = YoY_Month$In_person / Year_over_year$In_person,
+               Online_percent = YoY_Month$Online / Year_over_year$Online)
 
-combined <- rbind(Monthly_average, combined_part)
+# Year-to-date averages for current and past year
+By_week <- Weekly_data |>
+        mutate(Year = year(Date)) |>
+        mutate(Month = month(Date, label = TRUE))
 
-##Summarize data by year for combined, online-only, and in-person attendance
-Combined_yearly <- Weekly_total %>%
-        select(Date, 
-               total.attendance, 
-               First, 
-               Second, 
-               FirstServe24, 
-               SecondServe24) %>%
-        rename(In_person = total.attendance, 
-               Ascent = First, 
-               Sanctuary = Second, 
-               Ascent_online = FirstServe24, 
-               Sanctuary_online = SecondServe24) %>%
-        group_by(Date) %>%
-        mutate(Online = sum(c(Ascent_online, Sanctuary_online), na.rm = TRUE)) %>%
-        mutate(Online = replace(Online, Online == 0, NA)) %>%
-        mutate(Total = sum(c(In_person, Online), na.rm = TRUE)) %>%
-        mutate(Total = replace(Total, Total == 0, NA)) %>%
-        group_by(Date = floor_date(Date, "year")) %>%
-        summarise(Ascent = mean(Ascent, na.rm = TRUE),
-                  Sanctuary = mean(Sanctuary, na.rm = TRUE),
-                  Ascent_online = mean(Ascent_online, na.rm = TRUE),
-                  Sanctuary_online = mean(Sanctuary_online, na.rm = TRUE),
-                  In_person = mean(In_person, na.rm = TRUE),
-                  Online = mean(Online, na.rm = TRUE),
-                  Total = mean(Total, na.rm = TRUE))
+End_week <- tail(By_week$Week, 1)
+Current_year <- tail(By_week$Year, 1)
+Previous_year <- Current_year - 1
+Current_month <- tail(By_week$Month, 1)
 
-yearly_in_person <- Combined_yearly %>%
-        select(Date, In_person) %>%
-        rename(attendance = In_person)
+Attendance_past_year <- subset(By_week, Year == Previous_year & Week <= End_week)
+Attendance_current_year <- subset(By_week, Year == Current_year)
 
-yearly_online <- Combined_yearly %>%
-        select(Date, Online) %>%
-        rename(attendance = Online) %>%
-        filter(Date >= "2017-01-01")
+Weekly_ave_past_year <- Attendance_past_year |>
+        group_by(Year) |>
+        summarise(Total = round(mean(Total), 1),
+                  In_person = round(mean(In_person), 1),
+                  Online = round(mean(Online), 1))
 
-yearly_combined <- Combined_yearly %>%
-        select(Date, Total) %>%
-        rename(attendance = Total)
+Weekly_ave_current_year <- Attendance_current_year |>
+        group_by(Year) |>
+        summarise(Total = round(mean(Total), 2),
+                  In_person = round(mean(In_person), 2),
+                  Online = round(mean(Online), 2))
 
-##Year-over-year actual and percent change
-combined_last_month_change <-
-        tail(combined$attendance, 14)[13] -
-        tail(combined$attendance, 14)[1]
-
-combined_last_month_percent_change <-
-        percent(((tail(combined$attendance, 14)[13] -
-                          tail(combined$attendance, 14)[1])
-                 /
-                         tail(combined$attendance, 14)[1])
-        )
-
-in_person_last_month_change <-
-        tail(in_person_full_data$attendance, 14)[13] -
-        tail(in_person_full_data$attendance, 14)[1]
-
-in_person_last_month_percent_change <-
-        percent(((tail(in_person_full_data$attendance, 14)[13] -
-                          tail(in_person_full_data$attendance, 14)[1])
-                 /
-                         tail(in_person_full_data$attendance, 14)[1])
-        )
-
-online_last_month_change <-
-        tail(online$attendance, 14)[13] -
-        tail(online$attendance, 14)[1]
-
-online_last_month_percent_change <-
-        percent(((tail(online$attendance, 14)[13] -
-                          tail(online$attendance, 14)[1])
-                 /
-                         tail(online$attendance, 14)[1])
-        )
-
-combined_current_month_change <-
-        tail(combined$attendance, 13)[13] -
-        tail(combined$attendance, 13)[1]
-
-combined_current_month_percent_change <-
-        percent(((tail(combined$attendance, 13)[13] -
-                          tail(combined$attendance, 13)[1])
-                 /
-                         tail(combined$attendance, 13)[1])
-        )
-
-in_person_current_month_change <-
-        tail(in_person_full_data$attendance, 13)[13] -
-        tail(in_person_full_data$attendance, 13)[1]
-
-in_person_current_month_percent_change <-
-        percent(((tail(in_person_full_data$attendance, 13)[13] -
-                          tail(in_person_full_data$attendance, 13)[1])
-                 /
-                         tail(in_person_full_data$attendance, 13)[1])
-        )
-
-online_current_month_change <-
-        tail(online$attendance, 13)[13] -
-        tail(online$attendance, 13)[1]
-
-online_current_month_percent_change <-
-        percent(((tail(online$attendance, 13)[13] -
-                          tail(online$attendance, 13)[1])
-                 /
-                         tail(online$attendance, 13)[1])
-        )
-
-#Pull weekly data together for table
-weekly_base_data <- Weekly_total %>%
-        select(Date, 
-               total.attendance, 
-               First, 
-               Second, 
-               FirstServe24, 
-               SecondServe24) %>%
-        rename(In_person = total.attendance, 
-               Ascent = First, 
-               Sanctuary = Second, 
-               Ascent_online = FirstServe24, 
-               Sanctuary_online = SecondServe24) %>%
-        group_by(Date) %>%
-        mutate(Online = sum(c(Ascent_online, Sanctuary_online), na.rm = TRUE)) %>%
-        mutate(Online = replace(Online, Online == 0, NA)) %>%
-        mutate(Total = sum(c(In_person, Online), na.rm = TRUE)) %>%
-        mutate(Total = replace(Total, Total == 0, NA))
-
-Weekly_in_person <- weekly_base_data %>%
-        select(Date, In_person) %>%
-        rename(attendance = In_person)
-
-Weekly_online <- weekly_base_data %>%
-        select(Date, Online) %>%
-        rename(attendance = Online) %>%
-        filter(Date >= "2017-12-01")
-
-Weekly_combined <- weekly_base_data %>%
-        select(Date, Total) %>%
-        rename(attendance = Total)
-
-##Pull monthly data out for tables
-previous_month <- month.name[as.numeric(format(as.Date(tail(combined$Date, 13)[12]), "%m"))]
-current_month <- month.name[as.numeric(format(as.Date(tail(combined$Date, 13)[13]), "%m"))]
-
-##Create tables
-latest <- matrix(c(tail(Weekly_combined$attendance, 1),
-                   tail(Weekly_in_person$attendance, 1),
-                   tail(Weekly_online$attendance, 1),
-                   tail(combined$attendance, 1),
-                   tail(in_person_full_data$attendance, 1),
-                   tail(online$attendance, 1),
-                   tail(combined$attendance, 2)[1],
-                   tail(in_person_full_data$attendance, 2)[1],
-                   tail(online$attendance, 2)[1],
-                   tail(yearly_combined$attendance, 1),
-                   tail(yearly_in_person$attendance, 1),
-                   tail(yearly_online$attendance, 1),
-                   tail(yearly_combined$attendance, 2)[1],
-                   tail(yearly_in_person$attendance, 2)[1],
-                   tail(yearly_online$attendance, 2)[1]
-),
-ncol = 5,
-byrow = FALSE
+# Main summary table
+main_table <- matrix(c(
+        Last_week$Total,
+        Last_week$In_person,
+        Last_week$Online,
+        Month_to_date$Total,
+        Month_to_date$In_person,
+        Month_to_date$Online,
+        Year_over_year$Total,
+        Year_over_year$In_person,
+        Year_over_year$Online,
+        YoY_Month$Total,
+        YoY_Month$In_person,
+        YoY_Month$Online,
+        label_percent(accuracy = 0.1)(YoY_Month$Total_percent),
+        label_percent(accuracy = 0.1)(YoY_Month$In_person_percent),
+        label_percent(accuracy = 0.1)(YoY_Month$Online_percent)),
+        ncol = 5,
+        byrow = FALSE
 )
 
-colnames(latest) <- c("Last week",
-                      "Current Month-to-date",
-                      "Previous Month Average",
-                      "Current Year-to-date",
-                      "Previous Year Average")
+colnames(main_table) <- c("Last week",
+                      paste(Current_month, Current_year, sep = " "),
+                      paste(Current_month, Previous_year, sep = " "),
+                      "Change",
+                      "Percent change")
 
-rownames(latest) <- c("Total",
-                      "In person",
-                      "Online")
+rownames(main_table) <- c("Combined",
+                          "In person",
+                          "Online")
 
-total_change_table <- matrix(c(previous_month,
-                               format(round(combined_last_month_change, 1),
-                                      nsmall = 1),
-                               format(round(in_person_last_month_change, 1),
-                                      nsmall = 1),
-                               format(round(online_last_month_change, 1),
-                                      nsmall = 1),
-                               previous_month,
-                               combined_last_month_percent_change,
-                               in_person_last_month_percent_change,
-                               online_last_month_percent_change,
-                               current_month,
-                               format(round(combined_current_month_change, 1),
-                                      nsmall = 1),
-                               format(round(in_person_current_month_change, 1),
-                                      nsmall = 1),
-                               format(round(online_current_month_change, 1),
-                                      nsmall = 1),
-                               current_month,
-                               combined_current_month_percent_change,
-                               in_person_current_month_percent_change,
-                               online_current_month_percent_change
-),
-ncol = 4,
-byrow = FALSE
+# Year-to-date averages, absolute change, and percent change table
+ytd_change <- data.frame(Total = Weekly_ave_current_year$Total - Weekly_ave_past_year$Total,
+                         In_person = Weekly_ave_current_year$In_person - Weekly_ave_past_year$In_person,
+                         Online = Weekly_ave_current_year$Online - Weekly_ave_past_year$Online)
+
+ytd_change <- ytd_change |>
+        mutate(Total_percent = ytd_change$Total / Weekly_ave_past_year$Total,
+               In_person_percent = ytd_change$In_person / Weekly_ave_past_year$In_person,
+               Online_percent = ytd_change$Online / Weekly_ave_past_year$Online)
+
+ytd_table <- matrix(c(Weekly_ave_current_year$Total,
+                               Weekly_ave_current_year$In_person,
+                               Weekly_ave_current_year$Online,
+                               Weekly_ave_past_year$Total,
+                               Weekly_ave_past_year$In_person,
+                               Weekly_ave_past_year$Online,
+                               round(ytd_change$Total, 1),
+                               round(ytd_change$In_person, 1),
+                               round(ytd_change$Online, 1),
+                               label_percent(accuracy = 0.1)(ytd_change$Total_percent),
+                               label_percent(accuracy = 0.1)(ytd_change$In_person_percent),
+                               label_percent(accuracy = 0.1)(ytd_change$Online_percent)),
+                             ncol = 4,
+                             byrow = FALSE
+        
 )
 
-colnames(total_change_table) <- c("Total change",
-                                  "Percent change",
-                                  "Total change",
+colnames(ytd_table) <- c(paste(Current_year),
+                                  paste(Previous_year),
+                                  "Change",
                                   "Percent change")
 
-rownames(total_change_table) <- c("Month",
-                                  "Combined",
+rownames(ytd_table) <- c("Combined",
                                   "In person",
                                   "Online")
+
+# Data sets for reactive selection option
+## In person
+in_person_data <- Weekly_data |>
+        select(Date,
+               In_person) |>
+        group_by(Date = floor_date(Date, "month")) |>
+        summarize(attendance = round(mean(In_person, na.rm = TRUE), 2))
+
+## Online
+online <- Weekly_data |>
+        select(Date,
+               Online) |>
+        group_by(Date = floor_date(Date, "month")) |>
+        summarize(attendance = round(mean(Online, na.rm = TRUE), 2))
+
+## Combined
+combined <- Weekly_data |>
+        select(Date,
+               Total) |>
+        group_by(Date = floor_date(Date, "month")) |>
+        summarize(attendance = round(mean(Total, na.rm = TRUE), 2))

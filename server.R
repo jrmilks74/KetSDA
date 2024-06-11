@@ -13,6 +13,7 @@ library(scales)
 library(timetk)
 library(plotly)
 library(knitr)
+library(kableExtra)
 
 # Loading data and analysis results
 source("main_tab.R")
@@ -21,19 +22,35 @@ source("Sanctuary_tab.R")
 
 # Define server logic required to draw a histogram
 function(input, output, session) {
-
-        output$latest <- renderTable(latest, align = "c", rownames = TRUE)
-        output$total_change_table <- renderTable(total_change_table, align = "c", rownames = TRUE)
+        # Main table
+        output$main_table <- function() ({
+          main_table <- kbl(main_table) |>
+                  kable_styling(bootstrap_options = c("striped"),
+                                full_width = FALSE) |>
+                  add_header_above(c(" ", " ", "Weekly Average" = 2, "Year-over-year" = 2))
+          main_table
+        })
         
+        # Year-to-date table
+        output$year_to_date_table <- function() ({
+                year_to_date_table <- kbl(ytd_table) |>
+                        kable_styling(bootstrap_options = c("striped"),
+                                      full_width = FALSE) |>
+                        add_header_above(c(" ", "Year-to-date weekly average" = 2, " ", " "))
+                year_to_date_table
+        })
+        
+        # Reactive data set selection
         data_reactive <- reactive({
                 if (input$dataset == "in_person")
-                        in_person_full_data
+                        in_person_data
                 else if (input$dataset == "online")
                         online
                 else
                         combined
         })
         
+        # Reactive month selection
         time_period <- reactive({
                 if (input$time == "jan")
                         1
@@ -63,6 +80,7 @@ function(input, output, session) {
                         1:12
         })
         
+        # Seasonal plot, main tab
         output$p <- renderPlotly({ 
                 data_set = data_reactive() %>%
                         filter(lubridate::month(Date) %in% time_period())
@@ -77,9 +95,8 @@ function(input, output, session) {
                              y = "Average attendance")
         })
         
+        # Time series plot, main tab
         output$s <- renderPlotly({
-                this_year <- year(tail(Combined_yearly$Date)[6])
-                previous_year <- year(tail(Combined_yearly$Date)[5])
                 data_set = data_reactive()
                 
                 s <- data_set %>%
@@ -88,30 +105,49 @@ function(input, output, session) {
                         ggplot(aes(x = Date, y = attendance, colour = Year)) +
                         scale_x_date(date_breaks = "1 month", date_labels = "%b") +
                         geom_line(aes(group = Year), colour = "black", alpha = 0.1) +
-                        geom_line(data = function(x) filter(x, Year == previous_year), lwd = 0.5) +
-                        geom_line(data = function(x) filter(x, Year == this_year), lwd = 1) +
+                        geom_line(data = function(x) filter(x, Year == Previous_year), lwd = 0.5) +
+                        geom_line(data = function(x) filter(x, Year == Current_year), lwd = 1) +
                         theme_bw() +
                         labs(y = "Average attendance per week",
                              x = "Month")
                 ggplotly(s)
         })
         
+        # Ascent tab output
+        # Ascent main table
+        output$Ascent_main_table <- function() ({
+                Ascent_main_table <- kbl(Ascent_main_table) |>
+                        kable_styling(bootstrap_options = c("striped"),
+                                      full_width = FALSE) |>
+                        add_header_above(c(" ", " ", "Weekly Average" = 2, "Year-over-year" = 2))
+                Ascent_main_table
+        })
         
-        output$Ascent_overview_table <- renderTable(Ascent_overview_table, align = "c",
-                                                    rownames = TRUE)
+        # Ascent year-to-date table
+        output$Ascent_ytd_table <- function() ({
+                Ascent_ytd_table <- kbl(Ascent_ytd_table) |>
+                        kable_styling(bootstrap_options = c("striped"),
+                                      full_width = FALSE) |>
+                        add_header_above(c(" ", "Weekly Average" = 2, " ", " "))
+                Ascent_ytd_table
+        })
         
-        output$Ascent_change_table <- renderTable(Ascent_change_table, align = "c",
-                                                  rownames = TRUE)
-        
+        # Ascent data set reactive
         Ascent_data_reactive <- reactive({
                 if (input$Ascent_dataset == "Ascent_in_person")
                         Ascent_in_person
                 else if (input$Ascent_dataset == "Ascent_online")
-                        Ascent_online
+                        Ascent_online <- Weekly_data|>
+                                select(Date,
+                                       AscentOnline) |>
+                                rename(Online = AscentOnline) |>
+                                group_by(floor_date(Date, "month")) |>
+                                summarise(attendance = round(mean(Online, na.rm = TRUE), 2))
                 else
                         Ascent_total
         })
         
+        # Ascent month selection reactive
         Ascent_time_period <- reactive({
                 if (input$Ascent_time == "jan")
                         1
@@ -141,6 +177,7 @@ function(input, output, session) {
                         1:12
         })
         
+        # Ascent seasonal plot
         output$Ascent_plot <- renderPlotly({ 
                 Ascent_data_set = Ascent_data_reactive() %>%
                         filter(lubridate::month(Date) %in% Ascent_time_period())
@@ -155,9 +192,10 @@ function(input, output, session) {
                              y = "Average attendance")
         })
         
+        # Ascent time series plot
         output$Ascent_s <- renderPlotly({
-                this_year <- year(tail(Combined_yearly$Date)[6])
-                previous_year <- year(tail(Combined_yearly$Date)[5])
+                this_year <- Ascent_Current_year
+                previous_year <- Ascent_Previous_year
                 Ascent_data_set = Ascent_data_reactive()
                 
                 Ascent_s <- Ascent_data_set %>%
@@ -174,11 +212,22 @@ function(input, output, session) {
                 ggplotly(Ascent_s)
         })
         
-        output$Sanctuary_overview_table <- renderTable(Sanctuary_overview_table, align = "c",
-                                                       rownames = TRUE)
+        # Sanctuary tab output
+        output$Sanctuary_main_table <- function() ({
+                Sanctuary_main_table <- kbl(Sanctuary_main_table) |>
+                        kable_styling(bootstrap_options = c("striped"),
+                                      full_width = FALSE) |>
+                        add_header_above(c(" ", " ", "Weekly Average" = 2, "Year-over-year" = 2))
+                Sanctuary_main_table
+        })
         
-        output$Sanctuary_change_table <- renderTable(Sanctuary_change_table, align = "c",
-                                                     rownames = TRUE)
+        output$Sanctuary_ytd_table <- function() ({
+                Sanctuary_ytd_table <- kbl(Sanctuary_ytd_table) |>
+                        kable_styling(bootstrap_options = c("striped"),
+                                      full_width = FALSE) |>
+                        add_header_above(c(" ", "Weekly Average" = 2, " ", " "))
+                Sanctuary_ytd_table
+        })
         
         Sanctuary_data_reactive <- reactive({
                 if (input$Sanctuary_dataset == "Sanctuary_in_person")
@@ -233,8 +282,8 @@ function(input, output, session) {
         })
         
         output$Sanctuary_s <- renderPlotly({
-                this_year <- year(tail(Combined_yearly$Date)[6])
-                previous_year <- year(tail(Combined_yearly$Date)[5])
+                this_year <- Sanctuary_Current_year
+                previous_year <- Sanctuary_Previous_year
                 Sanctuary_data_set = Sanctuary_data_reactive()
                 
                 Sanctuary_s <- Sanctuary_data_set %>%
