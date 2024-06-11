@@ -5,7 +5,7 @@ library(knitr)
 
 source("source_data.R")
 
-# Calculations for the Ascent tab
+# Calculations for the Sanctuary tab
 ### Create the base data set
 Sanctuary_base <- Weekly_data |>
         select(Date,
