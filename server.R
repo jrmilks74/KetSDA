@@ -27,7 +27,8 @@ function(input, output, session) {
           main_table <- kbl(main_table) |>
                   kable_styling(bootstrap_options = c("striped"),
                                 full_width = FALSE) |>
-                  add_header_above(c(" ", " ", "Weekly Average" = 2, "Year-over-year" = 2))
+                  add_header_above(c(" ", " ", "Weekly Average" = 2, "Year-over-year" = 2)) |>
+                  column_spec(1, bold = T)
           main_table
         })
         
@@ -36,7 +37,8 @@ function(input, output, session) {
                 year_to_date_table <- kbl(ytd_table) |>
                         kable_styling(bootstrap_options = c("striped"),
                                       full_width = FALSE) |>
-                        add_header_above(c(" ", "Year-to-date weekly average" = 2, " ", " "))
+                        add_header_above(c(" ", "Year-to-date weekly average" = 2, " ", " ")) |>
+                        column_spec(1, bold = T)
                 year_to_date_table
         })
         
@@ -119,7 +121,8 @@ function(input, output, session) {
                 Ascent_main_table <- kbl(Ascent_main_table) |>
                         kable_styling(bootstrap_options = c("striped"),
                                       full_width = FALSE) |>
-                        add_header_above(c(" ", " ", "Weekly Average" = 2, "Year-over-year" = 2))
+                        add_header_above(c(" ", " ", "Weekly Average" = 2, "Year-over-year" = 2)) |>
+                        column_spec(1, bold = T)
                 Ascent_main_table
         })
         
@@ -128,7 +131,8 @@ function(input, output, session) {
                 Ascent_ytd_table <- kbl(Ascent_ytd_table) |>
                         kable_styling(bootstrap_options = c("striped"),
                                       full_width = FALSE) |>
-                        add_header_above(c(" ", "Weekly Average" = 2, " ", " "))
+                        add_header_above(c(" ", "Weekly Average" = 2, " ", " ")) |>
+                        column_spec(1, bold = T)
                 Ascent_ytd_table
         })
         
@@ -137,12 +141,7 @@ function(input, output, session) {
                 if (input$Ascent_dataset == "Ascent_in_person")
                         Ascent_in_person
                 else if (input$Ascent_dataset == "Ascent_online")
-                        Ascent_online <- Weekly_data|>
-                                select(Date,
-                                       AscentOnline) |>
-                                rename(Online = AscentOnline) |>
-                                group_by(floor_date(Date, "month")) |>
-                                summarise(attendance = round(mean(Online, na.rm = TRUE), 2))
+                        Ascent_online
                 else
                         Ascent_total
         })
@@ -194,8 +193,8 @@ function(input, output, session) {
         
         # Ascent time series plot
         output$Ascent_s <- renderPlotly({
-                this_year <- Ascent_Current_year
-                previous_year <- Ascent_Previous_year
+                Ascent_this_year <- Ascent_Current_year
+                Ascent_previous_year <- Ascent_Previous_year
                 Ascent_data_set = Ascent_data_reactive()
                 
                 Ascent_s <- Ascent_data_set %>%
@@ -204,8 +203,8 @@ function(input, output, session) {
                         ggplot(aes(x = Date, y = attendance, colour = Year)) +
                         scale_x_date(date_breaks = "1 month", date_labels = "%b") +
                         geom_line(aes(group = Year), colour = "black", alpha = 0.1) +
-                        geom_line(data = function(x) filter(x, Year == previous_year), lwd = 0.5) +
-                        geom_line(data = function(x) filter(x, Year == this_year), lwd = 1) +
+                        geom_line(data = function(x) filter(x, Year == Ascent_previous_year), lwd = 0.5) +
+                        geom_line(data = function(x) filter(x, Year == Ascent_this_year), lwd = 1) +
                         theme_bw() +
                         labs(y = "Average attendance per week",
                              x = "Month")
@@ -217,7 +216,8 @@ function(input, output, session) {
                 Sanctuary_main_table <- kbl(Sanctuary_main_table) |>
                         kable_styling(bootstrap_options = c("striped"),
                                       full_width = FALSE) |>
-                        add_header_above(c(" ", " ", "Weekly Average" = 2, "Year-over-year" = 2))
+                        add_header_above(c(" ", " ", "Weekly Average" = 2, "Year-over-year" = 2)) |>
+                        column_spec(1, bold = T)
                 Sanctuary_main_table
         })
         
@@ -225,7 +225,8 @@ function(input, output, session) {
                 Sanctuary_ytd_table <- kbl(Sanctuary_ytd_table) |>
                         kable_styling(bootstrap_options = c("striped"),
                                       full_width = FALSE) |>
-                        add_header_above(c(" ", "Weekly Average" = 2, " ", " "))
+                        add_header_above(c(" ", "Weekly Average" = 2, " ", " ")) |>
+                        column_spec(1, bold = T)
                 Sanctuary_ytd_table
         })
         
