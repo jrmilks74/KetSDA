@@ -1,0 +1,721 @@
+# app.R
+library(shiny)
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(timetk)
+library(plotly)
+library(knitr)
+library(kableExtra)
+library(googlesheets4)
+
+# Forecasting stack
+library(modeltime)
+library(parsnip)
+library(workflows)
+library(rsample)
+library(yardstick)
+library(imputeTS)
+library(timeDate)
+
+# Weighted ensembling lives here (optional but recommended)
+suppressWarnings({
+        ok_ens <- requireNamespace("modeltime.ensemble", quietly = TRUE)
+        if (ok_ens) library(modeltime.ensemble)
+})
+
+options(shiny.fullstacktrace = TRUE)
+
+## --------------------------
+## 1) Data load (one place)
+## --------------------------
+options(gargle_oauth_email = TRUE,
+        gargle_oauth_cache = "KetSDA/.secrets/")
+suppressMessages(gs4_auth(email = "office@ketsda.org"))
+
+Weekly_data <- read_sheet(
+        "https://docs.google.com/spreadsheets/d/1BsQR4TyAMkV2H09jzuj5yrOIotnOBTzLoSZ0r5PsBpk/edit#gid=0",
+        col_names = TRUE,
+        col_types = "Ddddddc"
+) |>
+        rename(
+                Ascent      = "First/Ascent",
+                Sanctuary   = "Second/Sanctuary",
+                In_person   = "total.attendance"
+        ) |>
+        mutate(
+                Week = isoweek(Date),
+                Online           = rowSums(across(c(AscentOnline, SanctuaryOnline)), na.rm = TRUE),
+                Total            = Online + In_person,
+                Total_Ascent     = Ascent + coalesce(AscentOnline, 0),
+                Total_Sanctuary  = Sanctuary + coalesce(SanctuaryOnline, 0)
+        ) |>
+        mutate(
+                Online           = na_if(Online, 0),
+                Total            = na_if(Total, 0),
+                Total_Ascent     = na_if(Total_Ascent, 0),
+                Total_Sanctuary  = na_if(Total_Sanctuary, 0)
+        )
+
+## ----------------------------------------
+## 2) Column mapping per "service" context
+## ----------------------------------------
+svc_map <- list(
+        overall = list(in_person = "In_person", online = "Online", total = "Total"),
+        ascent  = list(in_person = "Ascent",    online = "AscentOnline", total = "Total_Ascent"),
+        sanct   = list(in_person = "Sanctuary", online = "SanctuaryOnline", total = "Total_Sanctuary")
+)
+
+## --------------------------
+## 3) Helper functions (DRY)
+## --------------------------
+normalize_metric_names <- function(df) {
+        names(df) <- gsub("^\\.", "", names(df))  # strip leading dots
+        df
+}
+
+normalize_forecast_cols <- function(fc) {
+        nm <- names(fc)
+        if (!".index" %in% nm) {
+                cand <- intersect(c(".date", "date", "index"), nm)
+                if (length(cand)) fc <- dplyr::rename(fc, .index = !!rlang::sym(cand[1]))
+        }
+        lo_cand <- intersect(c(".conf_lo", "conf_lo", ".conf_low", "conf_low"), names(fc))
+        hi_cand <- intersect(c(".conf_hi", "conf_hi", ".conf_high", "conf_high"), names(fc))
+        if (length(lo_cand)) fc <- dplyr::rename(fc, .conf_lo = !!rlang::sym(lo_cand[1]))
+        if (length(hi_cand)) fc <- dplyr::rename(fc, .conf_hi = !!rlang::sym(hi_cand[1]))
+        fc
+}
+
+make_base <- function(df, map) {
+        df |>
+                transmute(
+                        Date,
+                        Week,
+                        In_person = .data[[map$in_person]],
+                        Online    = .data[[map$online]],
+                        Total     = .data[[map$total]]
+                )
+}
+
+monthly_mean <- function(df) {
+        df |>
+                group_by(Date = floor_date(Date, "month")) |>
+                summarise(attendance = round(mean(.data$val, na.rm = TRUE), 2), .groups = "drop")
+}
+
+last_week_triplet <- function(base_df) {
+        lw <- tail(base_df, 1)
+        tibble(Total = lw$Total, In_person = lw$In_person, Online = lw$Online)
+}
+
+month_to_date_triplet <- function(base_df) {
+        base_df |>
+                mutate(Month = floor_date(Date, "month")) |>
+                group_by(Month) |>
+                summarise(
+                        In_person = round(mean(In_person, na.rm = TRUE), 2),
+                        Online    = round(mean(Online,    na.rm = TRUE), 2),
+                        Total     = round(mean(Total,     na.rm = TRUE), 2),
+                        .groups = "drop"
+                ) |>
+                slice_tail(n = 1)
+}
+
+same_month_last_year_triplet <- function(base_df) {
+        by_m <- base_df |>
+                mutate(Month = floor_date(Date, "month")) |>
+                group_by(Month) |>
+                summarise(
+                        In_person = round(mean(In_person, na.rm = TRUE), 2),
+                        Online    = round(mean(Online,    na.rm = TRUE), 2),
+                        Total     = round(mean(Total,     na.rm = TRUE), 2),
+                        .groups = "drop"
+                )
+        if (nrow(by_m) >= 13) {
+                by_m |> slice_tail(n = 13) |> slice_head(n = 1)
+        } else {
+                tibble(Month = as.Date(NA), In_person = NA_real_, Online = NA_real_, Total = NA_real_)
+        }
+}
+
+yoy_delta <- function(curr, prev) {
+        tibble(
+                Total     = round(curr$Total     - prev$Total,     1),
+                In_person = round(curr$In_person - prev$In_person, 1),
+                Online    = round(curr$Online    - prev$Online,    1)
+        ) |>
+                mutate(
+                        Total_percent     = Total     / prev$Total,
+                        In_person_percent = In_person / prev$In_person,
+                        Online_percent    = Online    / prev$Online
+                )
+}
+
+ytd_averages <- function(df_base) {
+        by_week <- df_base |>
+                mutate(Year = year(Date), MonthLbl = month(Date, label = TRUE))
+        end_week <- tail(by_week$Week, 1)
+        curr_year <- tail(by_week$Year, 1)
+        prev_year <- curr_year - 1
+        curr_month_lbl <- tail(by_week$MonthLbl, 1)
+        
+        past_year <- subset(by_week, Year == prev_year & Week <= end_week)
+        curr_yr   <- subset(by_week, Year == curr_year)
+        
+        weekly_ave_past <- summarise(
+                past_year,
+                Total     = round(mean(Total,     na.rm = TRUE), 1),
+                In_person = round(mean(In_person, na.rm = TRUE), 1),
+                Online    = round(mean(Online,    na.rm = TRUE), 1)
+        )
+        weekly_ave_curr <- summarise(
+                curr_yr,
+                Total     = round(mean(Total,     na.rm = TRUE), 2),
+                In_person = round(mean(In_person, na.rm = TRUE), 2),
+                Online    = round(mean(Online,    na.rm = TRUE), 2)
+        )
+        
+        list(
+                end_week = end_week,
+                curr_year = curr_year,
+                prev_year = prev_year,
+                curr_month_lbl = curr_month_lbl,
+                weekly_ave_past = weekly_ave_past,
+                weekly_ave_curr = weekly_ave_curr
+        )
+}
+
+make_main_table <- function(lastweek, mtd, prev, curr_flags) {
+        mat <- matrix(c(
+                lastweek$Total,     lastweek$In_person,     lastweek$Online,
+                mtd$Total,          mtd$In_person,          mtd$Online,
+                prev$Total,         prev$In_person,         prev$Online,
+                NA,                 NA,                     NA,
+                NA,                 NA,                     NA
+        ), ncol = 5, byrow = FALSE)
+        
+        deltas <- yoy_delta(mtd, prev)
+        mat[, 4] <- c(deltas$Total, deltas$In_person, deltas$Online)
+        mat[, 5] <- c(
+                label_percent(0.1)(deltas$Total_percent),
+                label_percent(0.1)(deltas$In_person_percent),
+                label_percent(0.1)(deltas$Online_percent)
+        )
+        
+        colnames(mat) <- c(
+                "Last week",
+                paste(curr_flags$curr_month_lbl, curr_flags$curr_year),
+                paste(curr_flags$curr_month_lbl, curr_flags$prev_year),
+                "Change", "Percent change"
+        )
+        rownames(mat) <- c("Combined", "In person", "Online")
+        mat
+}
+
+make_ytd_table <- function(curr_flags) {
+        chg <- tibble(
+                Total     = curr_flags$weekly_ave_curr$Total     - curr_flags$weekly_ave_past$Total,
+                In_person = curr_flags$weekly_ave_curr$In_person - curr_flags$weekly_ave_past$In_person,
+                Online    = curr_flags$weekly_ave_curr$Online    - curr_flags$weekly_ave_past$Online
+        ) |>
+                mutate(
+                        Total_percent     = Total     / curr_flags$weekly_ave_past$Total,
+                        In_person_percent = In_person / curr_flags$weekly_ave_past$In_person,
+                        Online_percent    = Online    / curr_flags$weekly_ave_past$Online
+                )
+        mat <- matrix(c(
+                curr_flags$weekly_ave_curr$Total,
+                curr_flags$weekly_ave_curr$In_person,
+                curr_flags$weekly_ave_curr$Online,
+                curr_flags$weekly_ave_past$Total,
+                curr_flags$weekly_ave_past$In_person,
+                curr_flags$weekly_ave_past$Online,
+                round(chg$Total, 1),
+                round(chg$In_person, 1),
+                round(chg$Online,  1),
+                label_percent(0.1)(chg$Total_percent),
+                label_percent(0.1)(chg$In_person_percent),
+                label_percent(0.1)(chg$Online_percent)
+        ), ncol = 4, byrow = FALSE)
+        colnames(mat) <- c(paste(curr_flags$curr_year), paste(curr_flags$prev_year), "Change", "Percent change")
+        rownames(mat) <- c("Combined", "In person", "Online")
+        mat
+}
+
+make_monthly_datasets <- function(base_df) {
+        list(
+                in_person = base_df |> transmute(Date, val = In_person) |> monthly_mean(),
+                online    = base_df |> filter(Date >= as.Date("2017-12-01")) |> transmute(Date, val = Online) |> monthly_mean(),
+                total     = base_df |> transmute(Date, val = Total) |> monthly_mean()
+        )
+}
+
+# ----- Holiday helpers -----
+make_holiday_df <- function(date_range) {
+        yrs <- seq(year(min(date_range, na.rm = TRUE)) - 1,
+                   year(max(date_range, na.rm = TRUE)) + 1)
+        
+        easters <- as.Date(timeDate::Easter(yrs))
+        christmas <- as.Date(paste0(yrs, "-12-25"))
+        memorial_mondays <- as.Date(sapply(yrs, function(y) {
+                may_days <- seq.Date(as.Date(paste0(y, "-05-01")), as.Date(paste0(y, "-05-31")), by = "day")
+                tail(may_days[weekdays(may_days) == "Monday"], 1)
+        }))
+        
+        grad_weekend <- tibble(
+                holiday = "GraduationWeekend",
+                ds = c(memorial_mondays - 3, memorial_mondays - 2, memorial_mondays - 1),
+                lower_window = 0, upper_window = 0
+        )
+        
+        make_h <- function(name, dates, lw = 0, uw = 0) {
+                tibble(holiday = name, ds = as.Date(dates), lower_window = lw, upper_window = uw)
+        }
+        
+        bind_rows(
+                make_h("Easter", easters, lw = -1, uw = 0),
+                make_h("Christmas", christmas, lw = -1, uw = 0),
+                make_h("MemorialDay", memorial_mondays, lw = -2, uw = 1),
+                grad_weekend
+        )
+}
+
+# ----- Weekly regularization & imputation -----
+to_weekly_regular <- function(df, reopen_date) {
+        wk <- df %>%
+                filter(Date >= reopen_date) %>%
+                transmute(WeekStart = floor_date(Date, "week", week_start = 1),
+                          In_person, Online, Total) %>%
+                group_by(WeekStart) %>%
+                summarise(
+                        In_person = mean(In_person, na.rm = TRUE),
+                        Online    = mean(Online,    na.rm = TRUE),
+                        Total     = mean(Total,     na.rm = TRUE),
+                        .groups = "drop"
+                ) %>%
+                arrange(WeekStart)
+        
+        full_weeks <- tibble(WeekStart = seq(min(wk$WeekStart), max(wk$WeekStart), by = "1 week"))
+        wk_full <- full_weeks %>%
+                left_join(wk, by = "WeekStart") %>%
+                mutate(was_missing = if_else(is.na(Total) & is.na(In_person) & is.na(Online), 1L, 0L))
+        
+        wk_full %>%
+                mutate(
+                        In_person = imputeTS::na_interpolation(In_person, option = "linear"),
+                        Online    = imputeTS::na_interpolation(Online,    option = "linear"),
+                        Total     = imputeTS::na_interpolation(Total,     option = "linear")
+                )
+}
+
+# ----- Build modeling set for a chosen series -----
+build_series_tbl <- function(wk_regular_df, which_series = c("total","in_person","online")) {
+        which_series <- match.arg(which_series)
+        col <- switch(which_series,
+                      in_person = "In_person",
+                      online    = "Online",
+                      total     = "Total")
+        wk_regular_df %>% transmute(date = WeekStart, value = .data[[col]])
+}
+
+# ----- Fit models & performance-weighted ensemble (robust) -----
+fit_ensemble_weighted <- function(series_tbl, holidays_df, horizon_weeks = 13, conf = 0.80) {
+        set.seed(123)
+        
+        split <- time_series_split(series_tbl, assess = horizon_weeks, cumulative = TRUE)
+        
+        m_prophet <- prophet_reg(seasonality_yearly = TRUE, seasonality_weekly = TRUE, changepoint_num = 25) %>%
+                set_engine("prophet", holidays = holidays_df) %>%
+                fit(value ~ date, data = training(split))
+        
+        m_arima <- arima_reg() %>% set_engine("auto_arima") %>% fit(value ~ date, data = training(split))
+        m_ets   <- exp_smoothing() %>% set_engine("ets") %>% fit(value ~ date, data = training(split))
+        
+        models_tbl <- modeltime_table(m_prophet, m_arima, m_ets)
+        
+        cal <- models_tbl %>% modeltime_calibrate(new_data = testing(split))
+        
+        acc <- cal %>% modeltime_accuracy() %>% normalize_metric_names()
+        
+        # Keep models with finite RMSE
+        acc_keep <- acc %>% dplyr::filter(is.finite(rmse))
+        keep_ids <- acc_keep$model_id
+        
+        if (length(keep_ids) == 0) {
+                # fallback: refit best available (or first) single model
+                best_id <- acc %>% dplyr::arrange(rmse) %>% dplyr::slice(1) %>% dplyr::pull(model_id)
+                if (length(best_id) == 0 || is.na(best_id)) best_id <- models_tbl$.model_id[[1]]
+                ens_tbl   <- models_tbl %>% dplyr::filter(.model_id == best_id)
+                refit_ens <- ens_tbl %>% modeltime_refit(data = series_tbl)
+                acc$weight <- ifelse(acc$model_id == best_id, 1, NA_real_)
+                return(list(split = split, accuracy = acc, refit = refit_ens, conf = conf))
+        }
+        
+        # Align calibration to kept ids / order
+        cal_keep <- cal %>%
+                dplyr::filter(.model_id %in% keep_ids) %>%
+                dplyr::arrange(match(.model_id, keep_ids))
+        
+        # Inverse-RMSE weights
+        inv_rmse <- 1 / acc_keep$rmse
+        inv_rmse[!is.finite(inv_rmse)] <- NA_real_
+        if (any(is.na(inv_rmse))) inv_rmse[is.na(inv_rmse)] <- min(inv_rmse, na.rm = TRUE) * 0.5
+        w <- inv_rmse / sum(inv_rmse)
+        
+        if (length(w) == 1 || !ok_ens) {
+                # Single survivor or ensemble pkg missing -> use single model
+                solo_id  <- keep_ids[[1]]
+                ens_tbl  <- models_tbl %>% dplyr::filter(.model_id == solo_id)
+                refit_ens <- ens_tbl %>% modeltime_refit(data = series_tbl)
+                acc$weight <- ifelse(acc$model_id == solo_id, 1, NA_real_)
+        } else {
+                # Weighted ensemble -> wrap in modeltime_table() BEFORE refit
+                ens_obj <- modeltime.ensemble::ensemble_weighted(cal_keep, w)
+                ens_tbl <- modeltime_table(ens_obj)
+                refit_ens <- ens_tbl %>% modeltime_refit(data = series_tbl)
+                acc <- acc %>%
+                        dplyr::left_join(tibble(model_id = keep_ids, weight = round(w, 4)), by = "model_id")
+        }
+        
+        list(split = split, accuracy = acc, refit = refit_ens, conf = conf)
+}
+
+# ----- Forecast helper -----
+make_forecast <- function(refit_ens, series_tbl, horizon_weeks = 13, conf = 0.80) {
+        refit_ens %>%
+                modeltime_forecast(
+                        h = horizon_weeks,
+                        new_data = NULL,
+                        actual_data = series_tbl,
+                        conf_interval = conf
+                )
+}
+
+## ------------------------------
+## 4) Attendance module (UI)
+## ------------------------------
+attendanceTabUI <- function(id, tab_title) {
+        ns <- NS(id)
+        tabPanel(
+                tab_title,
+                sidebarLayout(
+                        sidebarPanel(
+                                selectInput(ns("dataset"), label = h3("Attendance data set"),
+                                            choices = list("Total" = "total", "In Person" = "in_person", "Online" = "online"),
+                                            selected = "total"),
+                                p("Choose in-person, online, or total attendance."),
+                                selectInput(ns("month"), label = h3("Month"),
+                                            choices = list("All"="all","January"="jan","February"="feb","March"="mar","April"="apr",
+                                                           "May"="may","June"="jun","July"="jul","August"="aug","September"="sep",
+                                                           "October"="oct","November"="nov","December"="dec"),
+                                            selected = "all"),
+                                p("Filter the seasonal plot by month")
+                        ),
+                        mainPanel(
+                                h3("By the Numbers"),
+                                h4("Current Attendance per week"),
+                                htmlOutput(ns("main_table")),
+                                h4("Year-to-date attendance per week"),
+                                htmlOutput(ns("ytd_table")),
+                                h3("Attendance Over Time"),
+                                plotlyOutput(ns("seasonal")),
+                                h3("Seasonal attendance patterns"),
+                                plotlyOutput(ns("spaghetti"))
+                        )
+                )
+        )
+}
+
+## --------------------------------
+## 5) Attendance module (Server)
+## --------------------------------
+attendanceTabServer <- function(id, base_df, monthly_sets, curr_flags) {
+        moduleServer(id, function(input, output, session) {
+                # Month mapping
+                month_key <- c(all = NA, jan = 1, feb = 2, mar = 3, apr = 4, may = 5, jun = 6,
+                               jul = 7, aug = 8, sep = 9, oct = 10, nov = 11, dec = 12)
+                sel_months <- reactive({
+                        sel <- month_key[[input$month]]
+                        if (is.na(sel)) 1:12 else sel
+                })
+                
+                # Tables
+                lw   <- last_week_triplet(base_df)
+                mtd  <- month_to_date_triplet(base_df)
+                prev <- same_month_last_year_triplet(base_df)
+                main_tbl <- make_main_table(lw, mtd, prev, curr_flags)
+                ytd_tbl  <- make_ytd_table(curr_flags)
+                
+                output$main_table <- renderUI({
+                        tbl <- kbl(main_tbl, row.names = TRUE) |>
+                                kable_styling(bootstrap_options = c("striped"), full_width = FALSE) |>
+                                add_header_above(c(" " = 1, " " = 1, "Weekly Average" = 2, "Year-over-year" = 2)) |>
+                                column_spec(1, bold = TRUE)
+                        HTML(as.character(tbl))
+                })
+                
+                output$ytd_table  <- renderUI({
+                        tbl <- kbl(ytd_tbl, row.names = TRUE) |>
+                                kable_styling(bootstrap_options = c("striped"), full_width = FALSE) |>
+                                add_header_above(c(" " = 1, "Year-to-date weekly average" = 2, " " = 1, " " = 1)) |>
+                                column_spec(1, bold = TRUE)
+                        HTML(as.character(tbl))
+                })
+                
+                # Reactive monthly dataset selection for plots
+                ds_reactive <- reactive({
+                        switch(input$dataset,
+                               in_person = monthly_sets$in_person,
+                               online    = monthly_sets$online,
+                               total     = monthly_sets$total)
+                })
+                
+                # Seasonal
+                output$seasonal <- renderPlotly({
+                        d <- ds_reactive() |> filter(month(Date) %in% sel_months())
+                        gp <- ggplot(d, aes(Date, attendance)) +
+                                theme_classic() +
+                                geom_point() +
+                                geom_line() +
+                                geom_smooth(method = "loess", formula = "y~x", col = "red") +
+                                labs(title = "Weekly average attendance by month",
+                                     x = "Date", y = "Average attendance")
+                        ggplotly(gp)
+                })
+                
+                # Spaghetti
+                output$spaghetti <- renderPlotly({
+                        d <- ds_reactive()
+                        s <- d |>
+                                mutate(Year = factor(year(Date)), Date = update(Date, year = 1)) |>
+                                ggplot(aes(Date, attendance, colour = Year)) +
+                                scale_x_date(date_breaks = "1 month", date_labels = "%b") +
+                                geom_line(aes(group = Year), colour = "black", alpha = 0.1) +
+                                geom_line(data = function(x) dplyr::filter(x, Year == curr_flags$prev_year), lwd = 0.5) +
+                                geom_line(data = function(x) dplyr::filter(x, Year == curr_flags$curr_year), lwd = 1) +
+                                theme_bw() +
+                                labs(y = "Average attendance per week", x = "Month")
+                        ggplotly(s)
+                })
+        })
+}
+
+## ------------------------------
+## 6) Forecast module (UI)
+## ------------------------------
+forecastTabUI <- function(id) {
+        ns <- NS(id)
+        tabPanel(
+                "Forecast",
+                sidebarLayout(
+                        sidebarPanel(
+                                selectInput(ns("fc_service"), "Service",
+                                            choices = c("Overall" = "overall", "Ascent" = "ascent", "Sanctuary" = "sanct"),
+                                            selected = "overall"),
+                                selectInput(ns("fc_dataset"), "Data set",
+                                            choices = c("Total" = "total", "In Person" = "in_person", "Online" = "online"),
+                                            selected = "total"),
+                                sliderInput(ns("fc_horizon"), "Forecast horizon (weeks)", min = 8, max = 26, value = 13, step = 1),
+                                helpText("Performance-weighted ensemble: Prophet + ARIMA + ETS with holiday effects and 80% intervals.")
+                        ),
+                        mainPanel(
+                                h3("Weekly Attendance Forecast (2 to 6 months)"),
+                                plotlyOutput(ns("fc_plot")),
+                                br(),
+                                h4("Backtest accuracy (last horizon)"),
+                                tableOutput(ns("fc_accuracy"))
+                        )
+                )
+        )
+}
+
+## ------------------------------
+## 7) Forecast module (Server)
+## ------------------------------
+forecastTabServer <- function(id, Weekly_data, svc_map) {
+        moduleServer(id, function(input, output, session) {
+                
+                get_base_df <- reactive({
+                        switch(input$fc_service,
+                               overall = make_base(Weekly_data, svc_map$overall),
+                               ascent  = make_base(Weekly_data, svc_map$ascent),
+                               sanct   = make_base(Weekly_data, svc_map$sanct))
+                })
+                
+                wk_regular <- reactive({
+                        to_weekly_regular(get_base_df(), as.Date("2021-04-03"))
+                })
+                
+                series_tbl <- reactive({
+                        build_series_tbl(wk_regular(), input$fc_dataset)
+                })
+                
+                holidays_df <- reactive({
+                        make_holiday_df(series_tbl()$date)
+                })
+                
+                .model_cache <- reactiveVal(new.env(parent = emptyenv()))
+                
+                get_fit <- reactive({
+                        key <- paste(input$fc_service, input$fc_dataset, sep = "_")
+                        cache <- .model_cache()
+                        if (!exists(key, envir = cache)) {
+                                fit <- fit_ensemble_weighted(
+                                        series_tbl = series_tbl(),
+                                        holidays_df = holidays_df(),
+                                        horizon_weeks = input$fc_horizon,
+                                        conf = 0.80
+                                )
+                                assign(key, fit, envir = cache)
+                        }
+                        get(key, envir = cache)
+                })
+                
+                output$fc_accuracy <- renderTable({
+                        acc <- get_fit()$accuracy |> normalize_metric_names()
+                        acc %>%
+                                dplyr::select(model_desc = dplyr::any_of(c("model_desc", ".model_desc")),
+                                              rmse, mae, mape, rsq, weight) %>%
+                                dplyr::mutate(dplyr::across(where(is.numeric), ~ round(.x, 3)))
+                })
+                
+                output$fc_plot <- renderPlotly({
+                        fit <- get_fit()
+                        fc <- make_forecast(
+                                refit_ens = fit$refit,
+                                series_tbl = series_tbl(),
+                                horizon_weeks = input$fc_horizon,
+                                conf = fit$conf
+                        ) %>% normalize_forecast_cols()
+                        
+                        act  <- dplyr::filter(fc, .key == "actual")
+                        pred <- dplyr::filter(fc, .key == "prediction")
+                        
+                        # --- ensure we have CI; if not, synthesize from weighted RMSE at 80% (z ~ 1.2816)
+                        have_ci_cols <- all(c(".conf_lo", ".conf_hi") %in% names(pred))
+                        need_ci_fallback <- !have_ci_cols || !any(is.finite(pred$.conf_lo) & is.finite(pred$.conf_hi))
+                        
+                        if (need_ci_fallback && nrow(pred)) {
+                                acc <- fit$accuracy
+                                # normalize names once more
+                                names(acc) <- gsub("^\\.", "", names(acc))
+                                # use weights if present; otherwise uniform over finite rmse
+                                acc_ok <- acc %>% dplyr::filter(is.finite(rmse))
+                                if (nrow(acc_ok) > 0) {
+                                        if ("weight" %in% names(acc_ok) && any(is.finite(acc_ok$weight))) {
+                                                wts <- acc_ok$weight
+                                                wts[!is.finite(wts)] <- 0
+                                                if (sum(wts) == 0) wts <- rep(1 / nrow(acc_ok), nrow(acc_ok))
+                                                rmse_eff <- sum(wts * acc_ok$rmse)  # weighted RMSE
+                                        } else {
+                                                rmse_eff <- mean(acc_ok$rmse)       # simple average if no weights
+                                        }
+                                        z80 <- 1.281552
+                                        pred$.conf_lo <- pred$.value - z80 * rmse_eff
+                                        pred$.conf_hi <- pred$.value + z80 * rmse_eff
+                                }
+                                # bind synthesized CIs back into fc so plotting below works uniformly
+                                if (!(".conf_lo" %in% names(fc))) fc$.conf_lo <- NA_real_
+                                if (!(".conf_hi" %in% names(fc))) fc$.conf_hi <- NA_real_
+                                fc$.conf_lo[fc$.key == "prediction"] <- pred$.conf_lo
+                                fc$.conf_hi[fc$.key == "prediction"] <- pred$.conf_hi
+                        }
+                        
+                        # Plotly
+                        has_ci <- " .conf_lo" %in% names(pred) && " .conf_hi" %in% names(pred) # placeholder to avoid typos
+                        # recompute with the actual names
+                        has_ci <- all(c(".conf_lo", ".conf_hi") %in% names(pred)) &&
+                                any(is.finite(pred$.conf_lo) & is.finite(pred$.conf_hi))
+                        
+                        p <- plotly::plot_ly()
+                        
+                        if (has_ci) {
+                                p <- p %>%
+                                        add_ribbons(
+                                                data = pred,
+                                                x = ~.index, ymin = ~.conf_lo, ymax = ~.conf_hi,
+                                                name = "80% CI",
+                                                hoverinfo = "skip",
+                                                opacity = 0.25
+                                        )
+                        }
+                        
+                        if (nrow(act)) {
+                                p <- p %>%
+                                        add_lines(
+                                                data = act,
+                                                x = ~.index, y = ~.value,
+                                                name = "Actuals"
+                                        )
+                        }
+                        
+                        if (nrow(pred)) {
+                                p <- p %>%
+                                        add_lines(
+                                                data = pred,
+                                                x = ~.index, y = ~.value,
+                                                name = "Forecast"
+                                        )
+                        }
+                        
+                        p %>%
+                                layout(
+                                        title = "Weekly Attendance Forecast (80% confidence interval)",
+                                        xaxis = list(title = "Week"),
+                                        yaxis = list(title = "Attendance"),
+                                        legend = list(orientation = "h", x = 0, y = 1.1)
+                                )
+                })
+        })
+}
+
+## --------------------------
+## 8) UI (single place)
+## --------------------------
+ui <- fluidPage(
+        titlePanel("Kettering SDA Church Attendance"),
+        tabsetPanel(
+                attendanceTabUI("overall",   "Overall"),
+                attendanceTabUI("ascent",    "Ascent"),
+                attendanceTabUI("sanctuary", "Sanctuary"),
+                forecastTabUI("forecast")
+        ),
+        hr(),
+        h4("Created by: Jim Milks"),
+        "Version 6.3", br(),
+        format(Sys.Date(), "%d %B %Y"), br(),
+        "Code and data available at:",
+        a(href = "https://github.com/jrmilks74/KetSDA/tree/main",
+          "https://github.com/jrmilks74/KetSDA/tree/main"),
+        br(),
+        "Data updated every Monday"
+)
+
+## --------------------------
+## 9) Server (wire modules)
+## --------------------------
+server <- function(input, output, session) {
+        # OVERALL
+        overall_base <- make_base(Weekly_data, svc_map$overall)
+        overall_flags <- ytd_averages(overall_base)
+        overall_monthly <- make_monthly_datasets(overall_base)
+        attendanceTabServer("overall", overall_base, overall_monthly, overall_flags)
+        
+        # ASCENT
+        ascent_base <- make_base(Weekly_data, svc_map$ascent)
+        ascent_flags <- ytd_averages(ascent_base)
+        ascent_monthly <- make_monthly_datasets(ascent_base)
+        attendanceTabServer("ascent", ascent_base, ascent_monthly, ascent_flags)
+        
+        # SANCTUARY
+        sanct_base <- make_base(Weekly_data, svc_map$sanct)
+        sanct_flags <- ytd_averages(sanct_base)
+        sanct_monthly <- make_monthly_datasets(sanct_base)
+        attendanceTabServer("sanctuary", sanct_base, sanct_monthly, sanct_flags)
+        
+        # FORECAST
+        forecastTabServer("forecast", Weekly_data, svc_map)
+}
+
+shinyApp(ui, server)
