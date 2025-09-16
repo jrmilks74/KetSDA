@@ -18,7 +18,7 @@ library(yardstick)
 library(imputeTS)
 library(timeDate)
 
-# Weighted ensembling lives here (optional but recommended)
+# Weighted ensembling
 suppressWarnings({
         ok_ens <- requireNamespace("modeltime.ensemble", quietly = TRUE)
         if (ok_ens) library(modeltime.ensemble)
@@ -27,7 +27,7 @@ suppressWarnings({
 options(shiny.fullstacktrace = TRUE)
 
 ## --------------------------
-## 1) Data load (one place)
+## 1) Data load
 ## --------------------------
 options(gargle_oauth_email = TRUE,
         gargle_oauth_cache = "KetSDA/.secrets/")
@@ -58,7 +58,7 @@ Weekly_data <- read_sheet(
         )
 
 ## ----------------------------------------
-## 2) Column mapping per "service" context
+## 2) Column mapping
 ## ----------------------------------------
 svc_map <- list(
         overall = list(in_person = "In_person", online = "Online", total = "Total"),
@@ -67,21 +67,18 @@ svc_map <- list(
 )
 
 ## --------------------------
-## 3) Helper functions (DRY)
+## 3) Helpers
 ## --------------------------
-normalize_metric_names <- function(df) {
-        names(df) <- gsub("^\\.", "", names(df))  # strip leading dots
-        df
-}
+normalize_metric_names <- function(df) { names(df) <- gsub("^\\.", "", names(df)); df }
 
 normalize_forecast_cols <- function(fc) {
         nm <- names(fc)
         if (!".index" %in% nm) {
-                cand <- intersect(c(".date", "date", "index"), nm)
+                cand <- intersect(c(".date","date","index"), nm)
                 if (length(cand)) fc <- dplyr::rename(fc, .index = !!rlang::sym(cand[1]))
         }
-        lo_cand <- intersect(c(".conf_lo", "conf_lo", ".conf_low", "conf_low"), names(fc))
-        hi_cand <- intersect(c(".conf_hi", "conf_hi", ".conf_high", "conf_high"), names(fc))
+        lo_cand <- intersect(c(".conf_lo","conf_lo",".conf_low","conf_low"), names(fc))
+        hi_cand <- intersect(c(".conf_hi","conf_hi",".conf_high","conf_high"), names(fc))
         if (length(lo_cand)) fc <- dplyr::rename(fc, .conf_lo = !!rlang::sym(lo_cand[1]))
         if (length(hi_cand)) fc <- dplyr::rename(fc, .conf_hi = !!rlang::sym(hi_cand[1]))
         fc
@@ -196,8 +193,8 @@ make_main_table <- function(lastweek, mtd, prev, curr_flags) {
         ), ncol = 5, byrow = FALSE)
         
         deltas <- yoy_delta(mtd, prev)
-        mat[, 4] <- c(deltas$Total, deltas$In_person, deltas$Online)
-        mat[, 5] <- c(
+        mat[,4] <- c(deltas$Total, deltas$In_person, deltas$Online)
+        mat[,5] <- c(
                 label_percent(0.1)(deltas$Total_percent),
                 label_percent(0.1)(deltas$In_person_percent),
                 label_percent(0.1)(deltas$Online_percent)
@@ -251,34 +248,66 @@ make_monthly_datasets <- function(base_df) {
         )
 }
 
-# ----- Holiday helpers -----
-make_holiday_df <- function(date_range) {
+# ===== SDA holidays / regressors =====
+
+# Prophet-style weekly holidays (Saturday services mapped to WeekStart Monday)
+make_holiday_df_weekly <- function(date_range) {
         yrs <- seq(year(min(date_range, na.rm = TRUE)) - 1,
                    year(max(date_range, na.rm = TRUE)) + 1)
         
-        easters <- as.Date(timeDate::Easter(yrs))
-        christmas <- as.Date(paste0(yrs, "-12-25"))
-        memorial_mondays <- as.Date(sapply(yrs, function(y) {
-                may_days <- seq.Date(as.Date(paste0(y, "-05-01")), as.Date(paste0(y, "-05-31")), by = "day")
-                tail(may_days[weekdays(may_days) == "Monday"], 1)
-        }))
+        wk_monday <- function(d) floor_date(as.Date(d), "week", week_start = 1)
         
-        grad_weekend <- tibble(
-                holiday = "GraduationWeekend",
-                ds = c(memorial_mondays - 3, memorial_mondays - 2, memorial_mondays - 1),
+        # Easter Saturday
+        easter_sun <- as.Date(timeDate::Easter(yrs))
+        easter_sat <- easter_sun - 1L
+        
+        # Christmas service Saturday (or Dec 25 if Saturday)
+        dec25 <- as.Date(paste0(yrs, "-12-25"))
+        wd    <- wday(dec25, week_start = 1)         # Mon=1 ... Sat=6 Sun=7
+        back2sat <- (wd - 6L) %% 7L
+        christmas_service <- dec25 - back2sat
+        
+        # Graduation Saturday (Saturday before Memorial Day Monday)
+        memorial_mon <- as.Date(sapply(yrs, function(y) {
+                may <- seq.Date(as.Date(paste0(y,"-05-01")), as.Date(paste0(y,"-05-31")), by="day")
+                tail(may[weekdays(may) == "Monday"], 1)
+        }))
+        grad_sat <- memorial_mon - 2L
+        
+        make_h <- function(name, dates) tibble(
+                holiday = name,
+                ds = unique(wk_monday(dates)),
                 lower_window = 0, upper_window = 0
         )
         
-        make_h <- function(name, dates, lw = 0, uw = 0) {
-                tibble(holiday = name, ds = as.Date(dates), lower_window = lw, upper_window = uw)
-        }
-        
         bind_rows(
-                make_h("Easter", easters, lw = -1, uw = 0),
-                make_h("Christmas", christmas, lw = -1, uw = 0),
-                make_h("MemorialDay", memorial_mondays, lw = -2, uw = 1),
-                grad_weekend
-        )
+                make_h("Easter_Saturday", easter_sat),
+                make_h("Christmas_Service", christmas_service),
+                make_h("Graduation_Saturday", grad_sat),
+                make_h("MemorialDay_Week", memorial_mon)   # optional small effect
+        ) |>
+                distinct(holiday, ds, .keep_all = TRUE)
+}
+
+# Regressor dummies for ARIMA-xreg (0/1 flags) aligned to weekly Mondays
+sda_regressors_for_dates <- function(date_vec) {
+        rng <- c(min(date_vec, na.rm = TRUE) - years(1),
+                 max(date_vec, na.rm = TRUE) + years(1))
+        h <- make_holiday_df_weekly(rng)
+        
+        wk <- tibble(date = as.Date(date_vec))
+        is_easter  <- wk$date %in% h$ds[h$holiday == "Easter_Saturday"]
+        is_xmas    <- wk$date %in% h$ds[h$holiday == "Christmas_Service"]
+        is_grad    <- wk$date %in% h$ds[h$holiday == "Graduation_Saturday"]
+        is_memwk   <- wk$date %in% h$ds[h$holiday == "MemorialDay_Week"]
+        
+        wk |>
+                mutate(
+                        is_easter_sat = as.integer(is_easter),
+                        is_christmas_service = as.integer(is_xmas),
+                        is_graduation_sat = as.integer(is_grad),
+                        is_memorial_week  = as.integer(is_memwk)
+                )
 }
 
 # ----- Weekly regularization & imputation -----
@@ -309,41 +338,234 @@ to_weekly_regular <- function(df, reopen_date) {
                 )
 }
 
-# ----- Build modeling set for a chosen series -----
+# ----- Build modeling set for a chosen series (+ regressors) -----
 build_series_tbl <- function(wk_regular_df, which_series = c("total","in_person","online")) {
         which_series <- match.arg(which_series)
         col <- switch(which_series,
                       in_person = "In_person",
                       online    = "Online",
                       total     = "Total")
-        wk_regular_df %>% transmute(date = WeekStart, value = .data[[col]])
+        base <- wk_regular_df %>% transmute(date = WeekStart, value = .data[[col]])
+        regs <- sda_regressors_for_dates(base$date) %>% select(-date)
+        bind_cols(base, regs)
 }
 
-# ----- Fit models & performance-weighted ensemble (robust) -----
+# Future exogenous frame for horizon weeks
+make_future_xreg <- function(series_tbl, horizon_weeks) {
+        future_dates <- timetk::future_frame(series_tbl, .date_var = date,
+                                             .length_out = horizon_weeks, .bind_data = FALSE)
+        future_regs  <- sda_regressors_for_dates(future_dates$date) %>% select(-date)
+        bind_cols(future_dates, future_regs)
+}
+
+# ---- NEW: Learn event uplifts from history (additive deltas) ----
+compute_event_uplifts <- function(series_tbl, lookback_years = 3) {
+        series_tbl <- series_tbl %>%
+                mutate(Year = lubridate::year(date),
+                       Month = lubridate::month(date))
+        
+        # Baselines for delta/ratio learning (same as before)
+        dec_base <- series_tbl %>%
+                filter(Month == 12) %>%
+                group_by(Year) %>%
+                summarise(base = median(value, na.rm = TRUE), .groups = "drop")
+        
+        may_base <- series_tbl %>%
+                filter(Month == 5) %>%
+                group_by(Year) %>%
+                summarise(base = median(value, na.rm = TRUE), .groups = "drop")
+        
+        marapr_base <- series_tbl %>%
+                filter(Month %in% c(3, 4)) %>%
+                group_by(Year) %>%
+                summarise(base = median(value, na.rm = TRUE), .groups = "drop")
+        
+        # helper to learn additive/multiplicative vs baseline
+        learn_event <- function(flag_col, base_tbl) {
+                ev <- series_tbl %>% filter(.data[[flag_col]] == 1)
+                if (nrow(ev) == 0) {
+                        return(list(add = 0, mult = 0, max = NA_real_, med3 = NA_real_))
+                }
+                ev_with_base <- ev %>%
+                        left_join(base_tbl, by = "Year") %>%
+                        mutate(
+                                delta = value - base,
+                                ratio = ifelse(is.finite(base) & base > 0, value / base - 1, NA_real_)
+                        )
+                
+                # last-N-years median for this event
+                yrs <- sort(unique(ev$Year), decreasing = TRUE)
+                yrs_sel <- head(yrs, lookback_years)
+                med3 <- suppressWarnings(stats::median(ev$value[ev$Year %in% yrs_sel], na.rm = TRUE))
+                
+                list(
+                        add  = suppressWarnings(stats::median(ev_with_base$delta, na.rm = TRUE) %||% 0),
+                        mult = suppressWarnings(stats::median(ev_with_base$ratio, na.rm = TRUE) %||% 0),
+                        max  = suppressWarnings(max(ev$value, na.rm = TRUE)),
+                        med3 = if (is.finite(med3)) med3 else NA_real_
+                )
+        }
+        
+        easter  <- learn_event("is_easter_sat",        marapr_base)
+        xmas    <- learn_event("is_christmas_service", dec_base)
+        grad    <- learn_event("is_graduation_sat",    may_base)
+        
+        # safety
+        for (nm in c("add","mult")) {
+                if (!is.finite(easter[[nm]])) easter[[nm]] <- 0
+                if (!is.finite(xmas[[nm]]))   xmas[[nm]]   <- 0
+                if (!is.finite(grad[[nm]]))   grad[[nm]]   <- 0
+        }
+        
+        list(easter = easter, xmas = xmas, grad = grad)
+}
+
+# Apply uplifts to forecast rows that are event weeks
+apply_event_uplifts <- function(fc_all, future_tbl, uplifts,
+                                grad_add_shrink = 0.60,
+                                grad_mult_shrink = 0.25,
+                                min_mult_easter = 0.15,
+                                min_mult_xmas   = 0.15,
+                                min_mult_grad   = 0.05,
+                                band_lo = 0.05,
+                                band_hi = 0.05) {
+        
+        # Ensure CI columns exist
+        if (!(".conf_lo" %in% names(fc_all))) fc_all$.conf_lo <- NA_real_
+        if (!(".conf_hi" %in% names(fc_all))) fc_all$.conf_hi <- NA_real_
+        
+        # Build per-row multipliers and additive deltas keyed by .index
+        build_adj <- future_tbl %>%
+                transmute(
+                        .index = date,
+                        # Multipliers (1 + ratio), with floors
+                        mult_easter = 1 + max(uplifts$easter$mult, min_mult_easter),
+                        mult_xmas   = 1 + max(uplifts$xmas$mult,   min_mult_xmas),
+                        mult_grad   = 1 + max(uplifts$grad$mult * grad_mult_shrink, min_mult_grad),
+                        
+                        # Additive deltas
+                        add_easter  = uplifts$easter$add,
+                        add_xmas    = uplifts$xmas$add,
+                        add_grad    = uplifts$grad$add * grad_add_shrink,
+                        
+                        # Flags
+                        f_easter = is_easter_sat,
+                        f_xmas   = is_christmas_service,
+                        f_grad   = is_graduation_sat
+                ) %>%
+                mutate(
+                        # Combine effects only when flag is on
+                        mult_total = (ifelse(f_easter == 1, mult_easter, 1)) *
+                                (ifelse(f_xmas   == 1, mult_xmas,   1)) *
+                                (ifelse(f_grad   == 1, mult_grad,   1)),
+                        add_total  = ifelse(f_easter == 1, add_easter, 0) +
+                                ifelse(f_xmas   == 1, add_xmas,   0) +
+                                ifelse(f_grad   == 1, add_grad,   0)
+                ) %>%
+                select(.index, mult_total, add_total, f_easter, f_xmas, f_grad)
+        
+        out <- fc_all %>%
+                left_join(build_adj, by = ".index") %>%
+                mutate(
+                        mult_total = ifelse(.key == "prediction", coalesce(mult_total, 1), 1),
+                        add_total  = ifelse(.key == "prediction", coalesce(add_total,  0), 0),
+                        
+                        # Apply multiplicative then additive
+                        .value   = (.value   * mult_total) + add_total,
+                        .conf_lo = (.conf_lo * mult_total) + add_total,
+                        .conf_hi = (.conf_hi * mult_total) + add_total
+                )
+        
+        # ---- Median-of-last-3-years centering band per event (± band)
+        # helper to clamp against an event's median band if that event is active
+        clamp_to_band <- function(val, lo_band, hi_band, flag) {
+                ifelse(flag == 1, pmin(pmax(val, lo_band), hi_band), val)
+        }
+        
+        # Precompute bands (only if medians exist)
+        e_med <- uplifts$easter$med3
+        x_med <- uplifts$xmas$med3
+        g_med <- uplifts$grad$med3
+        
+        if (is.finite(e_med) || is.finite(x_med) || is.finite(g_med)) {
+                out <- out %>%
+                        mutate(
+                                # compute per-row bands (NA means no clamp for that event)
+                                e_lo = if (is.finite(e_med)) e_med * (1 - band_lo) else NA_real_,
+                                e_hi = if (is.finite(e_med)) e_med * (1 + band_hi) else NA_real_,
+                                x_lo = if (is.finite(x_med)) x_med * (1 - band_lo) else NA_real_,
+                                x_hi = if (is.finite(x_med)) x_med * (1 + band_hi) else NA_real_,
+                                g_lo = if (is.finite(g_med)) g_med * (1 - band_lo) else NA_real_,
+                                g_hi = if (is.finite(g_med)) g_med * (1 + band_hi) else NA_real_,
+                                
+                                # Only clamp predictions
+                                .value   = ifelse(.key == "prediction",
+                                                  clamp_to_band(.value,   coalesce(e_lo, -Inf), coalesce(e_hi,  Inf), coalesce(f_easter, 0)),
+                                                  .value),
+                                .value   = ifelse(.key == "prediction",
+                                                  clamp_to_band(.value,   coalesce(x_lo, -Inf), coalesce(x_hi,  Inf), coalesce(f_xmas,   0)),
+                                                  .value),
+                                .value   = ifelse(.key == "prediction",
+                                                  clamp_to_band(.value,   coalesce(g_lo, -Inf), coalesce(g_hi,  Inf), coalesce(f_grad,   0)),
+                                                  .value),
+                                
+                                .conf_hi = ifelse(.key == "prediction",
+                                                  pmax(.conf_hi, .value), .conf_hi),
+                                .conf_lo = ifelse(.key == "prediction",
+                                                  pmin(.conf_lo, .value), .conf_lo)
+                        ) %>%
+                        select(-e_lo, -e_hi, -x_lo, -x_hi, -g_lo, -g_hi)
+        }
+        
+        # Tidy
+        out %>% select(-mult_total, -add_total, -f_easter, -f_xmas, -f_grad)
+}
+
+# ----- Fit models & performance-weighted ensemble -----
 fit_ensemble_weighted <- function(series_tbl, holidays_df, horizon_weeks = 13, conf = 0.80) {
         set.seed(123)
         
         split <- time_series_split(series_tbl, assess = horizon_weeks, cumulative = TRUE)
         
-        m_prophet <- prophet_reg(seasonality_yearly = TRUE, seasonality_weekly = TRUE, changepoint_num = 25) %>%
-                set_engine("prophet", holidays = holidays_df) %>%
+        # Prophet with stronger holiday prior & multiplicative mode
+        m_prophet <- prophet_reg(
+                seasonality_yearly = TRUE,
+                seasonality_weekly = TRUE,
+                changepoint_num = 25
+        ) %>%
+                set_engine("prophet",
+                           holidays = holidays_df,
+                           holidays_prior_scale = 35,
+                           seasonality_mode = "multiplicative",
+                           changepoint_prior_scale = 0.1) %>%
                 fit(value ~ date, data = training(split))
         
-        m_arima <- arima_reg() %>% set_engine("auto_arima") %>% fit(value ~ date, data = training(split))
-        m_ets   <- exp_smoothing() %>% set_engine("ets") %>% fit(value ~ date, data = training(split))
+        # Baseline ARIMA
+        m_arima <- arima_reg() %>%
+                set_engine("auto_arima") %>%
+                fit(value ~ date, data = training(split))
         
-        models_tbl <- modeltime_table(m_prophet, m_arima, m_ets)
+        # Regression ARIMA with SDA holiday dummies
+        m_arima_x <- arima_reg() %>%
+                set_engine("auto_arima") %>%
+                fit(value ~ date + is_easter_sat + is_christmas_service + is_graduation_sat + is_memorial_week,
+                    data = training(split))
+        
+        # ETS
+        m_ets <- exp_smoothing() %>%
+                set_engine("ets") %>%
+                fit(value ~ date, data = training(split))
+        
+        models_tbl <- modeltime_table(m_prophet, m_arima, m_arima_x, m_ets)
         
         cal <- models_tbl %>% modeltime_calibrate(new_data = testing(split))
-        
         acc <- cal %>% modeltime_accuracy() %>% normalize_metric_names()
         
-        # Keep models with finite RMSE
+        # Keep finite RMSE models
         acc_keep <- acc %>% dplyr::filter(is.finite(rmse))
         keep_ids <- acc_keep$model_id
         
         if (length(keep_ids) == 0) {
-                # fallback: refit best available (or first) single model
                 best_id <- acc %>% dplyr::arrange(rmse) %>% dplyr::slice(1) %>% dplyr::pull(model_id)
                 if (length(best_id) == 0 || is.na(best_id)) best_id <- models_tbl$.model_id[[1]]
                 ens_tbl   <- models_tbl %>% dplyr::filter(.model_id == best_id)
@@ -363,14 +585,28 @@ fit_ensemble_weighted <- function(series_tbl, holidays_df, horizon_weeks = 13, c
         if (any(is.na(inv_rmse))) inv_rmse[is.na(inv_rmse)] <- min(inv_rmse, na.rm = TRUE) * 0.5
         w <- inv_rmse / sum(inv_rmse)
         
+        # Weight floor: favor holiday-aware models
+        desc <- tolower(acc_keep$model_desc)
+        is_prophet <- grepl("prophet", desc)
+        is_arimax  <- grepl("arima", desc) & grepl("xreg", desc)
+        
+        w_min <- numeric(length(w))
+        if (any(is_prophet)) w_min[is_prophet] <- 0.35
+        if (any(is_arimax))  w_min[is_arimax]  <- 0.30
+        
+        total_floor <- sum(w_min)
+        if (total_floor > 0 && total_floor < 0.95) {
+                w_rescaled <- (1 - total_floor) * (w / sum(w))
+                w <- w_rescaled + w_min
+                w <- w / sum(w)
+        }
+        
         if (length(w) == 1 || !ok_ens) {
-                # Single survivor or ensemble pkg missing -> use single model
                 solo_id  <- keep_ids[[1]]
                 ens_tbl  <- models_tbl %>% dplyr::filter(.model_id == solo_id)
                 refit_ens <- ens_tbl %>% modeltime_refit(data = series_tbl)
                 acc$weight <- ifelse(acc$model_id == solo_id, 1, NA_real_)
         } else {
-                # Weighted ensemble -> wrap in modeltime_table() BEFORE refit
                 ens_obj <- modeltime.ensemble::ensemble_weighted(cal_keep, w)
                 ens_tbl <- modeltime_table(ens_obj)
                 refit_ens <- ens_tbl %>% modeltime_refit(data = series_tbl)
@@ -381,15 +617,107 @@ fit_ensemble_weighted <- function(series_tbl, holidays_df, horizon_weeks = 13, c
         list(split = split, accuracy = acc, refit = refit_ens, conf = conf)
 }
 
-# ----- Forecast helper -----
-make_forecast <- function(refit_ens, series_tbl, horizon_weeks = 13, conf = 0.80) {
-        refit_ens %>%
+# ----- Forecast helper (uses future xregs + applies uplifts) -----
+make_future_xreg <- function(series_tbl, horizon_weeks) {
+        future_dates <- timetk::future_frame(series_tbl, .date_var = date,
+                                             .length_out = horizon_weeks, .bind_data = FALSE)
+        future_regs  <- sda_regressors_for_dates(future_dates$date) %>% select(-date)
+        bind_cols(future_dates, future_regs)
+}
+
+# Replace your current apply_event_uplifts() with this version
+# Replace your apply_event_uplifts() with this version
+apply_event_uplifts <- function(fc_all, future_tbl, uplifts,
+                                grad_add_shrink = 0.60,
+                                grad_mult_shrink = 0.25,
+                                grad_cap_buffer = 0.02,
+                                min_mult_easter = 0.15,
+                                min_mult_xmas   = 0.15,
+                                min_mult_grad   = 0.05) {
+        
+        # Ensure CI columns exist so we can safely add to them
+        if (!(".conf_lo" %in% names(fc_all))) fc_all$.conf_lo <- NA_real_
+        if (!(".conf_hi" %in% names(fc_all))) fc_all$.conf_hi <- NA_real_
+        
+        # Build per-row multipliers and additive deltas keyed by .index
+        build_adj <- future_tbl %>%
+                transmute(
+                        .index = date,
+                        # Multipliers (1 + ratio)
+                        mult_easter = 1 + max(uplifts$easter$mult, min_mult_easter),
+                        mult_xmas   = 1 + max(uplifts$xmas$mult,   min_mult_xmas),
+                        mult_grad   = 1 + max(uplifts$grad$mult * grad_mult_shrink, min_mult_grad),
+                        
+                        # Additive deltas
+                        add_easter  = uplifts$easter$add,
+                        add_xmas    = uplifts$xmas$add,
+                        add_grad    = uplifts$grad$add * grad_add_shrink,
+                        
+                        # Flags
+                        f_easter = is_easter_sat,
+                        f_xmas   = is_christmas_service,
+                        f_grad   = is_graduation_sat
+                ) %>%
+                mutate(
+                        # Combine only when the flag is on
+                        mult_total = (ifelse(f_easter == 1, mult_easter, 1)) *
+                                (ifelse(f_xmas   == 1, mult_xmas,   1)) *
+                                (ifelse(f_grad   == 1, mult_grad,   1)),
+                        add_total  = ifelse(f_easter == 1, add_easter, 0) +
+                                ifelse(f_xmas   == 1, add_xmas,   0) +
+                                ifelse(f_grad   == 1, add_grad,   0)
+                ) %>%
+                select(.index, mult_total, add_total, f_grad)
+        
+        # Join and adjust ONLY the prediction rows
+        out <- fc_all %>%
+                left_join(build_adj, by = ".index") %>%
+                mutate(
+                        mult_total = ifelse(.key == "prediction", coalesce(mult_total, 1), 1),
+                        add_total  = ifelse(.key == "prediction", coalesce(add_total,  0), 0),
+                        
+                        # Apply multiplicative then additive
+                        .value   = (.value   * mult_total) + add_total,
+                        .conf_lo = (.conf_lo * mult_total) + add_total,
+                        .conf_hi = (.conf_hi * mult_total) + add_total
+                )
+        
+        # Cap Graduation weeks to historical max (+ buffer)
+        if (is.finite(uplifts$grad$max) && uplifts$grad$max > 0) {
+                cap_val <- uplifts$grad$max * (1 + grad_cap_buffer)
+                out <- out %>%
+                        mutate(
+                                .value   = ifelse(.key == "prediction" & coalesce(f_grad, 0) == 1,
+                                                  pmin(.value, cap_val), .value),
+                                .conf_hi = ifelse(.key == "prediction" & coalesce(f_grad, 0) == 1,
+                                                  pmin(.conf_hi, cap_val), .conf_hi),
+                                # keep CI lower sensible
+                                .conf_lo = pmin(.conf_lo, .value)
+                        )
+        }
+        
+        # Tidy
+        out %>% select(-mult_total, -add_total, -f_grad)
+}
+
+# Replace your make_forecast() with this version
+make_forecast <- function(refit_ens, series_tbl, horizon_weeks = 13, conf = 0.80, uplifts = NULL) {
+        future_tbl <- make_future_xreg(series_tbl, horizon_weeks)
+        
+        fc <- refit_ens %>%
                 modeltime_forecast(
-                        h = horizon_weeks,
-                        new_data = NULL,
+                        new_data    = future_tbl,      # needed for ARIMA-xreg
                         actual_data = series_tbl,
                         conf_interval = conf
-                )
+                ) %>%
+                normalize_forecast_cols()
+        
+        # Post-adjust: apply learned uplifts (acts only on .key == "prediction")
+        if (!is.null(uplifts)) {
+                fc <- apply_event_uplifts(fc_all = fc, future_tbl = future_tbl, uplifts = uplifts)
+        }
+        
+        fc
 }
 
 ## ------------------------------
@@ -432,7 +760,7 @@ attendanceTabUI <- function(id, tab_title) {
 ## --------------------------------
 attendanceTabServer <- function(id, base_df, monthly_sets, curr_flags) {
         moduleServer(id, function(input, output, session) {
-                # Month mapping
+                
                 month_key <- c(all = NA, jan = 1, feb = 2, mar = 3, apr = 4, may = 5, jun = 6,
                                jul = 7, aug = 8, sep = 9, oct = 10, nov = 11, dec = 12)
                 sel_months <- reactive({
@@ -463,7 +791,6 @@ attendanceTabServer <- function(id, base_df, monthly_sets, curr_flags) {
                         HTML(as.character(tbl))
                 })
                 
-                # Reactive monthly dataset selection for plots
                 ds_reactive <- reactive({
                         switch(input$dataset,
                                in_person = monthly_sets$in_person,
@@ -471,7 +798,6 @@ attendanceTabServer <- function(id, base_df, monthly_sets, curr_flags) {
                                total     = monthly_sets$total)
                 })
                 
-                # Seasonal
                 output$seasonal <- renderPlotly({
                         d <- ds_reactive() |> filter(month(Date) %in% sel_months())
                         gp <- ggplot(d, aes(Date, attendance)) +
@@ -484,7 +810,6 @@ attendanceTabServer <- function(id, base_df, monthly_sets, curr_flags) {
                         ggplotly(gp)
                 })
                 
-                # Spaghetti
                 output$spaghetti <- renderPlotly({
                         d <- ds_reactive()
                         s <- d |>
@@ -492,8 +817,8 @@ attendanceTabServer <- function(id, base_df, monthly_sets, curr_flags) {
                                 ggplot(aes(Date, attendance, colour = Year)) +
                                 scale_x_date(date_breaks = "1 month", date_labels = "%b") +
                                 geom_line(aes(group = Year), colour = "black", alpha = 0.1) +
-                                geom_line(data = function(x) dplyr::filter(x, Year == curr_flags$prev_year), lwd = 0.5) +
-                                geom_line(data = function(x) dplyr::filter(x, Year == curr_flags$curr_year), lwd = 1) +
+                                geom_line(data = function(x) filter(x, Year == curr_flags$prev_year), lwd = 0.5) +
+                                geom_line(data = function(x) filter(x, Year == curr_flags$curr_year), lwd = 1) +
                                 theme_bw() +
                                 labs(y = "Average attendance per week", x = "Month")
                         ggplotly(s)
@@ -516,11 +841,11 @@ forecastTabUI <- function(id) {
                                 selectInput(ns("fc_dataset"), "Data set",
                                             choices = c("Total" = "total", "In Person" = "in_person", "Online" = "online"),
                                             selected = "total"),
-                                sliderInput(ns("fc_horizon"), "Forecast horizon (weeks)", min = 8, max = 26, value = 13, step = 1),
-                                helpText("Performance-weighted ensemble: Prophet + ARIMA + ETS with holiday effects and 80% intervals.")
+                                sliderInput(ns("fc_horizon"), "Forecast horizon (weeks)", min = 8, max = 52, value = 26, step = 1),
+                                helpText("Performance-weighted ensemble: Prophet + ARIMA (+xregs) + ETS with SDA holiday effects and 80% intervals + event uplifts.")
                         ),
                         mainPanel(
-                                h3("Weekly Attendance Forecast (2 to 6 months)"),
+                                h3("Weekly Attendance Forecast (2 to 12 months)"),
                                 plotlyOutput(ns("fc_plot")),
                                 br(),
                                 h4("Backtest accuracy (last horizon)"),
@@ -552,7 +877,12 @@ forecastTabServer <- function(id, Weekly_data, svc_map) {
                 })
                 
                 holidays_df <- reactive({
-                        make_holiday_df(series_tbl()$date)
+                        make_holiday_df_weekly(series_tbl()$date)
+                })
+                
+                # NEW: learn uplifts from history for the currently selected service/dataset
+                event_uplifts <- reactive({
+                        compute_event_uplifts(series_tbl())
                 })
                 
                 .model_cache <- reactiveVal(new.env(parent = emptyenv()))
@@ -586,82 +916,50 @@ forecastTabServer <- function(id, Weekly_data, svc_map) {
                                 refit_ens = fit$refit,
                                 series_tbl = series_tbl(),
                                 horizon_weeks = input$fc_horizon,
-                                conf = fit$conf
-                        ) %>% normalize_forecast_cols()
+                                conf = fit$conf,
+                                uplifts = event_uplifts()
+                        )
                         
                         act  <- dplyr::filter(fc, .key == "actual")
                         pred <- dplyr::filter(fc, .key == "prediction")
                         
-                        # --- ensure we have CI; if not, synthesize from weighted RMSE at 80% (z ~ 1.2816)
                         have_ci_cols <- all(c(".conf_lo", ".conf_hi") %in% names(pred))
                         need_ci_fallback <- !have_ci_cols || !any(is.finite(pred$.conf_lo) & is.finite(pred$.conf_hi))
-                        
                         if (need_ci_fallback && nrow(pred)) {
-                                acc <- fit$accuracy
-                                # normalize names once more
-                                names(acc) <- gsub("^\\.", "", names(acc))
-                                # use weights if present; otherwise uniform over finite rmse
+                                acc <- fit$accuracy; names(acc) <- gsub("^\\.", "", names(acc))
                                 acc_ok <- acc %>% dplyr::filter(is.finite(rmse))
                                 if (nrow(acc_ok) > 0) {
                                         if ("weight" %in% names(acc_ok) && any(is.finite(acc_ok$weight))) {
-                                                wts <- acc_ok$weight
-                                                wts[!is.finite(wts)] <- 0
-                                                if (sum(wts) == 0) wts <- rep(1 / nrow(acc_ok), nrow(acc_ok))
-                                                rmse_eff <- sum(wts * acc_ok$rmse)  # weighted RMSE
+                                                wts <- acc_ok$weight; wts[!is.finite(wts)] <- 0
+                                                if (sum(wts) == 0) wts <- rep(1/nrow(acc_ok), nrow(acc_ok))
+                                                rmse_eff <- sum(wts * acc_ok$rmse)
                                         } else {
-                                                rmse_eff <- mean(acc_ok$rmse)       # simple average if no weights
+                                                rmse_eff <- mean(acc_ok$rmse)
                                         }
                                         z80 <- 1.281552
                                         pred$.conf_lo <- pred$.value - z80 * rmse_eff
                                         pred$.conf_hi <- pred$.value + z80 * rmse_eff
                                 }
-                                # bind synthesized CIs back into fc so plotting below works uniformly
-                                if (!(".conf_lo" %in% names(fc))) fc$.conf_lo <- NA_real_
-                                if (!(".conf_hi" %in% names(fc))) fc$.conf_hi <- NA_real_
-                                fc$.conf_lo[fc$.key == "prediction"] <- pred$.conf_lo
-                                fc$.conf_hi[fc$.key == "prediction"] <- pred$.conf_hi
                         }
-                        
-                        # Plotly
-                        has_ci <- " .conf_lo" %in% names(pred) && " .conf_hi" %in% names(pred) # placeholder to avoid typos
-                        # recompute with the actual names
-                        has_ci <- all(c(".conf_lo", ".conf_hi") %in% names(pred)) &&
-                                any(is.finite(pred$.conf_lo) & is.finite(pred$.conf_hi))
                         
                         p <- plotly::plot_ly()
-                        
-                        if (has_ci) {
-                                p <- p %>%
-                                        add_ribbons(
+                        if (nrow(pred)) {
+                                # CI ribbon first (if present)
+                                if (all(c(".conf_lo", ".conf_hi") %in% names(pred)) &&
+                                    any(is.finite(pred$.conf_lo) & is.finite(pred$.conf_hi))) {
+                                        p <- p %>% add_ribbons(
                                                 data = pred,
                                                 x = ~.index, ymin = ~.conf_lo, ymax = ~.conf_hi,
-                                                name = "80% CI",
-                                                hoverinfo = "skip",
-                                                opacity = 0.25
+                                                name = "80% CI", hoverinfo = "skip", opacity = 0.25
                                         )
+                                }
                         }
-                        
-                        if (nrow(act)) {
-                                p <- p %>%
-                                        add_lines(
-                                                data = act,
-                                                x = ~.index, y = ~.value,
-                                                name = "Actuals"
-                                        )
-                        }
-                        
-                        if (nrow(pred)) {
-                                p <- p %>%
-                                        add_lines(
-                                                data = pred,
-                                                x = ~.index, y = ~.value,
-                                                name = "Forecast"
-                                        )
-                        }
+                        if (nrow(act))  p <- p %>% add_lines(data = act,  x = ~.index, y = ~.value, name = "Actuals")
+                        if (nrow(pred)) p <- p %>% add_lines(data = pred, x = ~.index, y = ~.value, name = "Forecast")
                         
                         p %>%
                                 layout(
-                                        title = "Weekly Attendance Forecast (80% confidence interval)",
+                                        title = "Weekly Attendance Forecast (80% confidence interval + event uplifts)",
                                         xaxis = list(title = "Week"),
                                         yaxis = list(title = "Attendance"),
                                         legend = list(orientation = "h", x = 0, y = 1.1)
@@ -671,7 +969,7 @@ forecastTabServer <- function(id, Weekly_data, svc_map) {
 }
 
 ## --------------------------
-## 8) UI (single place)
+## 8) UI
 ## --------------------------
 ui <- fluidPage(
         titlePanel("Kettering SDA Church Attendance"),
@@ -683,7 +981,7 @@ ui <- fluidPage(
         ),
         hr(),
         h4("Created by: Jim Milks"),
-        "Version 6.3", br(),
+        "Version 6.6", br(),
         format(Sys.Date(), "%d %B %Y"), br(),
         "Code and data available at:",
         a(href = "https://github.com/jrmilks74/KetSDA/tree/main",
@@ -693,7 +991,7 @@ ui <- fluidPage(
 )
 
 ## --------------------------
-## 9) Server (wire modules)
+## 9) Server
 ## --------------------------
 server <- function(input, output, session) {
         # OVERALL
