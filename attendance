@@ -118,7 +118,11 @@ summarise_triplet <- function(df) {
 }
 
 last_week_triplet <- function(base_df) {
-        lw <- base_df |> arrange(Date) |> slice_tail(n = 1)
+        
+        lw <- base_df |>
+                filter(!is.na(Date)) |>
+                arrange(Date) |>
+                slice_tail(n = 1)
         tibble(
                 Total     = lw$Total,
                 In_person = lw$In_person,
@@ -1081,7 +1085,7 @@ ui <- fluidPage(
         hr(),
         h4("Created by: Jim Milks"),
         "Version 6", br(),
-        "Updated 23 March 2026", br(),
+        "Updated 15 April 2026", br(),
         "Code and data available at:",
         a(
                 href = "https://github.com/jrmilks74/KetSDA/tree/main",
