@@ -1121,4 +1121,1501 @@ server <- function(input, output, session) {
         forecastTabServer("forecast", Weekly_data, svc_map)
 }
 
+# Drop-in forecasting overrides for the Kettering SDA attendance dashboard.
+#
+# Source this file after the dashboard's forecasting functions have been
+# defined and before shinyApp(ui, server):
+#
+#   source("baccalaureate_forecast_overrides.R")
+#
+# The ordinary weekly ensemble remains unchanged.  For the Saturday before
+# Memorial Day, its potentially event-contaminated point forecast is replaced
+# with a dedicated estimate learned from prior baccalaureate services and the
+# forecast level of the surrounding non-event weeks.
+
+
+# Locale-independent calculation of recurring service weeks -----------------
+
+make_holiday_df_weekly <- function(date_range) {
+        yrs <- seq(
+                lubridate::year(min(date_range, na.rm = TRUE)) - 1L,
+                lubridate::year(max(date_range, na.rm = TRUE)) + 1L
+        )
+        
+        wk_monday <- function(d) {
+                lubridate::floor_date(as.Date(d), "week", week_start = 1)
+        }
+        
+        easter_sun <- as.Date(timeDate::Easter(yrs))
+        easter_sat <- easter_sun - 1L
+        
+        dec25 <- as.Date(paste0(yrs, "-12-25"))
+        christmas_service <- dec25 -
+                ((lubridate::wday(dec25, week_start = 1) - 6L) %% 7L)
+        
+        # Memorial Day is the last Monday in May.  This calculation does not
+        # depend on the machine's language/locale, unlike weekdays().
+        may31 <- as.Date(paste0(yrs, "-05-31"))
+        memorial_mon <- may31 -
+                ((lubridate::wday(may31, week_start = 1) - 1L) %% 7L)
+        baccalaureate_sat <- memorial_mon - 2L
+        
+        make_h <- function(name, dates) {
+                tibble::tibble(
+                        holiday = name,
+                        ds = unique(wk_monday(dates)),
+                        lower_window = 0,
+                        upper_window = 0
+                )
+        }
+        
+        dplyr::bind_rows(
+                make_h("Easter_Saturday", easter_sat),
+                make_h("Christmas_Service", christmas_service),
+                # Keep the old internal name so the rest of the app remains
+                # backward compatible.
+                make_h("Graduation_Saturday", baccalaureate_sat),
+                make_h("MemorialDay_Week", memorial_mon)
+        ) |>
+                dplyr::distinct(holiday, ds, .keep_all = TRUE)
+}
+
+
+# Dedicated baccalaureate event model ----------------------------------------
+
+.winsorized_weighted_mean <- function(x, w, probs = c(0.10, 0.90)) {
+        ok <- is.finite(x) & is.finite(w) & w > 0
+        x <- x[ok]
+        w <- w[ok]
+        
+        if (!length(x)) return(NA_real_)
+        if (length(x) == 1L) return(x[[1]])
+        
+        lim <- stats::quantile(x, probs = probs, na.rm = TRUE, names = FALSE)
+        x <- pmin(pmax(x, lim[[1]]), lim[[2]])
+        stats::weighted.mean(x, w)
+}
+
+.baccalaureate_history <- function(series_tbl,
+                                   lookback_years = 5L,
+                                   flank_weeks = 3L) {
+        x <- series_tbl |>
+                dplyr::arrange(date) |>
+                dplyr::mutate(date = as.Date(date))
+        
+        event_rows <- x |>
+                dplyr::filter(is_graduation_sat == 1L, is.finite(value)) |>
+                dplyr::select(date, value)
+        
+        if (!nrow(event_rows)) {
+                return(tibble::tibble(
+                        date = as.Date(character()),
+                        value = numeric(),
+                        local_base = numeric(),
+                        delta = numeric(),
+                        ratio = numeric()
+                ))
+        }
+        
+        local_base <- vapply(event_rows$date, function(event_date) {
+                neighbours <- x |>
+                        dplyr::filter(
+                                date >= event_date - lubridate::weeks(flank_weeks),
+                                date <= event_date + lubridate::weeks(flank_weeks),
+                                date != event_date,
+                                is_easter_sat == 0L,
+                                is_christmas_service == 0L,
+                                is_graduation_sat == 0L,
+                                is_memorial_week == 0L,
+                                is.finite(value)
+                        ) |>
+                        dplyr::pull(value)
+                
+                if (length(neighbours) < 2L) NA_real_ else stats::median(neighbours)
+        }, numeric(1))
+        
+        event_rows |>
+                dplyr::mutate(
+                        local_base = local_base,
+                        delta = value - local_base,
+                        ratio = dplyr::if_else(
+                                is.finite(local_base) & local_base > 0,
+                                value / local_base,
+                                NA_real_
+                        )
+                ) |>
+                dplyr::filter(is.finite(local_base), is.finite(delta), is.finite(ratio)) |>
+                dplyr::arrange(dplyr::desc(date)) |>
+                dplyr::slice_head(n = lookback_years) |>
+                dplyr::arrange(date)
+}
+
+.estimate_baccalaureate_effect <- function(history, half_life_years = 2.0) {
+        n_events <- nrow(history)
+        if (!n_events) {
+                return(list(
+                        n = 0L,
+                        add = 0,
+                        ratio = 1,
+                        sigma = 0
+                ))
+        }
+        
+        age <- max(lubridate::year(history$date)) - lubridate::year(history$date)
+        recency_weight <- 0.5 ^ (age / half_life_years)
+        
+        add_est <- .winsorized_weighted_mean(history$delta, recency_weight)
+        ratio_est <- .winsorized_weighted_mean(history$ratio, recency_weight)
+        
+        if (!is.finite(add_est)) add_est <- 0
+        if (!is.finite(ratio_est)) ratio_est <- 1
+        
+        # The church describes this as a consistently high-attendance event;
+        # do not learn a negative "uplift" from noisy or incomplete history.
+        add_est <- max(add_est, 0)
+        ratio_est <- max(ratio_est, 1)
+        
+        add_sigma <- if (n_events >= 2L) stats::mad(history$delta, na.rm = TRUE) else 0
+        ratio_sigma <- if (n_events >= 2L) stats::mad(history$ratio, na.rm = TRUE) else 0
+        
+        list(
+                n = n_events,
+                add = add_est,
+                ratio = ratio_est,
+                add_sigma = if (is.finite(add_sigma)) add_sigma else 0,
+                ratio_sigma = if (is.finite(ratio_sigma)) ratio_sigma else 0,
+                history = history
+        )
+}
+
+
+# Extend the existing uplift learner without changing Easter/Christmas logic.
+if (!exists(".compute_event_uplifts_before_baccalaureate", inherits = FALSE)) {
+        .compute_event_uplifts_before_baccalaureate <- compute_event_uplifts
+}
+
+compute_event_uplifts <- function(series_tbl, lookback_years = 5L) {
+        out <- .compute_event_uplifts_before_baccalaureate(
+                series_tbl,
+                lookback_years = min(lookback_years, 3L)
+        )
+        
+        history <- .baccalaureate_history(
+                series_tbl,
+                lookback_years = lookback_years
+        )
+        out$baccalaureate <- .estimate_baccalaureate_effect(history)
+        out
+}
+
+
+.forecast_local_baseline <- function(pred, event_date, flank_weeks = 3L) {
+        nearby <- pred |>
+                dplyr::filter(
+                        .index >= event_date - lubridate::weeks(flank_weeks),
+                        .index <= event_date + lubridate::weeks(flank_weeks),
+                        .index != event_date,
+                        is.finite(.value)
+                ) |>
+                dplyr::pull(.value)
+        
+        if (length(nearby) < 2L) {
+                nearby <- pred |>
+                        dplyr::filter(
+                                .index >= event_date - lubridate::weeks(6L),
+                                .index <= event_date + lubridate::weeks(6L),
+                                .index != event_date,
+                                is.finite(.value)
+                        ) |>
+                        dplyr::pull(.value)
+        }
+        
+        if (!length(nearby)) NA_real_ else stats::median(nearby)
+}
+
+
+# Preserve the existing Easter and Christmas adjustments, disable its generic
+# graduation adjustment, then replace the baccalaureate point and interval with
+# the dedicated event estimate.
+if (!exists(".apply_event_uplifts_before_baccalaureate", inherits = FALSE)) {
+        .apply_event_uplifts_before_baccalaureate <- apply_event_uplifts
+}
+
+apply_event_uplifts <- function(fc_all, future_tbl, uplifts,
+                                grad_add_shrink = 0.60,
+                                grad_mult_shrink = 0.25,
+                                grad_cap_buffer = 0.02,
+                                min_mult_easter = 0.15,
+                                min_mult_xmas = 0.15,
+                                min_mult_grad = 0.05) {
+        legacy_uplifts <- uplifts
+        legacy_uplifts$grad$add <- 0
+        legacy_uplifts$grad$mult <- 0
+        legacy_uplifts$grad$max <- NA_real_
+        
+        out <- .apply_event_uplifts_before_baccalaureate(
+                fc_all = fc_all,
+                future_tbl = future_tbl,
+                uplifts = legacy_uplifts,
+                grad_add_shrink = 0,
+                grad_mult_shrink = 0,
+                grad_cap_buffer = grad_cap_buffer,
+                min_mult_easter = min_mult_easter,
+                min_mult_xmas = min_mult_xmas,
+                min_mult_grad = 0
+        )
+        
+        effect <- uplifts$baccalaureate
+        if (is.null(effect) || effect$n == 0L) return(out)
+        
+        event_dates <- future_tbl |>
+                dplyr::filter(is_graduation_sat == 1L) |>
+                dplyr::pull(date) |>
+                as.Date()
+        
+        if (!length(event_dates)) return(out)
+        
+        pred <- out |>
+                dplyr::filter(.key == "prediction") |>
+                dplyr::mutate(.index = as.Date(.index))
+        
+        # With three or more observed baccalaureates, the event estimate gets
+        # most of the weight.  Smaller samples are automatically conservative.
+        reliability <- effect$n / (effect$n + 0.5)
+        
+        for (event_date_raw in event_dates) {
+                # A base R for-loop drops the Date class from individual
+                # elements, so restore it explicitly before date arithmetic.
+                event_date <- as.Date(event_date_raw, origin = "1970-01-01")
+                local_base <- .forecast_local_baseline(pred, event_date)
+                if (!is.finite(local_base)) next
+                
+                by_addition <- local_base + effect$add
+                by_ratio <- local_base * effect$ratio
+                event_target <- mean(c(by_addition, by_ratio), na.rm = TRUE)
+                event_target <- local_base + reliability * (event_target - local_base)
+                event_target <- max(event_target, local_base, 0)
+                
+                row_id <- which(
+                        out$.key == "prediction" & as.Date(out$.index) == event_date
+                )
+                if (!length(row_id)) next
+                
+                old_half_width <- suppressWarnings(mean(c(
+                        out$.value[row_id] - out$.conf_lo[row_id],
+                        out$.conf_hi[row_id] - out$.value[row_id]
+                ), na.rm = TRUE))
+                if (!is.finite(old_half_width)) old_half_width <- 0
+                
+                event_sigma <- mean(c(
+                        effect$add_sigma,
+                        local_base * effect$ratio_sigma
+                ), na.rm = TRUE)
+                if (!is.finite(event_sigma)) event_sigma <- 0
+                
+                # Combine ordinary forecast uncertainty with variability in the
+                # event uplift.  1.281552 is the two-sided 80% normal multiplier.
+                event_half_width <- sqrt(
+                        old_half_width^2 + (1.281552 * event_sigma)^2
+                )
+                
+                out$.value[row_id] <- event_target
+                out$.conf_lo[row_id] <- pmax(0, event_target - event_half_width)
+                out$.conf_hi[row_id] <- event_target + event_half_width
+        }
+        
+        out
+}
+
+
+# Leave-one-year-out diagnostic shown beside the ordinary model metrics -------
+
+.baccalaureate_backtest <- function(series_tbl, lookback_years = 5L) {
+        history <- .baccalaureate_history(
+                series_tbl,
+                lookback_years = lookback_years
+        )
+        
+        if (nrow(history) < 3L) {
+                return(tibble::tibble(
+                        model_id = NA_integer_,
+                        model_desc = "Baccalaureate event adjustment (insufficient history)",
+                        rmse = NA_real_, mae = NA_real_, mape = NA_real_,
+                        rsq = NA_real_, weight = NA_real_
+                ))
+        }
+        
+        forecasts <- lapply(3:nrow(history), function(i) {
+                train <- history[seq_len(i - 1L), , drop = FALSE]
+                test <- history[i, , drop = FALSE]
+                est <- .estimate_baccalaureate_effect(train)
+                reliability <- est$n / (est$n + 0.5)
+                raw <- mean(c(
+                        test$local_base + est$add,
+                        test$local_base * est$ratio
+                ))
+                prediction <- test$local_base + reliability * (raw - test$local_base)
+                
+                tibble::tibble(actual = test$value, prediction = prediction)
+        }) |>
+                dplyr::bind_rows()
+        
+        err <- forecasts$prediction - forecasts$actual
+        tibble::tibble(
+                model_id = NA_integer_,
+                model_desc = paste0(
+                        "Baccalaureate event adjustment (", nrow(forecasts),
+                        " rolling tests)"
+                ),
+                rmse = sqrt(mean(err^2, na.rm = TRUE)),
+                mae = mean(abs(err), na.rm = TRUE),
+                mape = mean(abs(err / forecasts$actual), na.rm = TRUE) * 100,
+                rsq = NA_real_,
+                weight = NA_real_
+        )
+}
+
+if (!exists(".fit_ensemble_weighted_before_baccalaureate", inherits = FALSE)) {
+        .fit_ensemble_weighted_before_baccalaureate <- fit_ensemble_weighted
+}
+
+fit_ensemble_weighted <- function(series_tbl, holidays_df,
+                                  horizon_weeks = 13, conf = 0.80) {
+        out <- .fit_ensemble_weighted_before_baccalaureate(
+                series_tbl = series_tbl,
+                holidays_df = holidays_df,
+                horizon_weeks = horizon_weeks,
+                conf = conf
+        )
+        
+        event_accuracy <- .baccalaureate_backtest(series_tbl)
+        out$accuracy <- out$accuracy |>
+                normalize_metric_names() |>
+                dplyr::bind_rows(event_accuracy)
+        out
+}
+
+shinyApp(ui, server)library(shiny)
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(timetk)
+library(plotly)
+library(knitr)
+library(kableExtra)
+library(googlesheets4)
+
+# Forecasting stack
+library(modeltime)
+library(parsnip)
+library(workflows)
+library(rsample)
+library(yardstick)
+library(imputeTS)
+library(timeDate)
+
+# Weighted ensembling
+suppressWarnings({
+        ok_ens <- requireNamespace("modeltime.ensemble", quietly = TRUE)
+        if (ok_ens) library(modeltime.ensemble)
+})
+
+options(shiny.fullstacktrace = TRUE)
+
+`%||%` <- function(x, y) if (is.null(x) || length(x) == 0 || all(is.na(x))) y else x
+
+## --------------------------
+## 1) Data load
+## --------------------------
+options(
+        gargle_oauth_email = TRUE,
+        gargle_oauth_cache = "KetSDA/.secrets/"
+)
+suppressMessages(gs4_auth(email = "office@ketsda.org"))
+
+Weekly_data <- read_sheet(
+        "https://docs.google.com/spreadsheets/d/1BsQR4TyAMkV2H09jzuj5yrOIotnOBTzLoSZ0r5PsBpk/edit#gid=0",
+        range = "Sheet1!A:G",
+        col_names = TRUE,
+        col_types = "Ddddddc"
+) |>
+        rename(
+                Ascent    = "First/Ascent",
+                Sanctuary = "Second/Sanctuary",
+                In_person = "total.attendance"
+        ) |>
+        mutate(
+                Week             = isoweek(Date),
+                Online           = rowSums(across(c(AscentOnline, SanctuaryOnline)), na.rm = TRUE),
+                Total            = Online + In_person,
+                Total_Ascent     = Ascent + coalesce(AscentOnline, 0),
+                Total_Sanctuary  = Sanctuary + coalesce(SanctuaryOnline, 0)
+        ) |>
+        mutate(
+                Online           = na_if(Online, 0),
+                Total            = na_if(Total, 0),
+                Total_Ascent     = na_if(Total_Ascent, 0),
+                Total_Sanctuary  = na_if(Total_Sanctuary, 0)
+        )
+
+## ----------------------------------------
+## 2) Column mapping
+## ----------------------------------------
+svc_map <- list(
+        overall = list(in_person = "In_person", online = "Online", total = "Total"),
+        ascent  = list(in_person = "Ascent",    online = "AscentOnline", total = "Total_Ascent"),
+        sanct   = list(in_person = "Sanctuary", online = "SanctuaryOnline", total = "Total_Sanctuary")
+)
+
+## --------------------------
+## 3) Helpers
+## --------------------------
+normalize_metric_names <- function(df) {
+        names(df) <- gsub("^\\.", "", names(df))
+        df
+}
+
+normalize_forecast_cols <- function(fc) {
+        nm <- names(fc)
+        if (!".index" %in% nm) {
+                cand <- intersect(c(".date", "date", "index"), nm)
+                if (length(cand)) fc <- dplyr::rename(fc, .index = !!rlang::sym(cand[1]))
+        }
+        lo_cand <- intersect(c(".conf_lo", "conf_lo", ".conf_low", "conf_low"), names(fc))
+        hi_cand <- intersect(c(".conf_hi", "conf_hi", ".conf_high", "conf_high"), names(fc))
+        if (length(lo_cand)) fc <- dplyr::rename(fc, .conf_lo = !!rlang::sym(lo_cand[1]))
+        if (length(hi_cand)) fc <- dplyr::rename(fc, .conf_hi = !!rlang::sym(hi_cand[1]))
+        fc
+}
+
+make_base <- function(df, map) {
+        df |>
+                transmute(
+                        Date,
+                        Week,
+                        In_person = .data[[map$in_person]],
+                        Online    = .data[[map$online]],
+                        Total     = .data[[map$total]]
+                ) |>
+                arrange(Date)
+}
+
+monthly_mean <- function(df) {
+        df |>
+                group_by(Date = floor_date(Date, "month")) |>
+                summarise(attendance = round(mean(.data$val, na.rm = TRUE), 2), .groups = "drop")
+}
+
+summarise_triplet <- function(df) {
+        tibble(
+                Total     = round(mean(df$Total,     na.rm = TRUE), 2),
+                In_person = round(mean(df$In_person, na.rm = TRUE), 2),
+                Online    = round(mean(df$Online,    na.rm = TRUE), 2)
+        )
+}
+
+last_week_triplet <- function(base_df) {
+        
+        lw <- base_df |>
+                filter(!is.na(Date)) |>
+                arrange(Date) |>
+                slice_tail(n = 1)
+        tibble(
+                Total     = lw$Total,
+                In_person = lw$In_person,
+                Online    = lw$Online
+        )
+}
+
+last_week_label <- function(base_df) {
+        last_dt <- suppressWarnings(max(base_df$Date, na.rm = TRUE))
+        
+        if (is.na(last_dt)) {
+                return("Last week")
+        }
+        
+        paste0("Last week (", format(last_dt, "%B %d, %Y"), ")")
+}
+
+matched_mtd_yoy_triplets <- function(base_df) {
+        df <- base_df |>
+                arrange(Date) |>
+                mutate(
+                        Year     = year(Date),
+                        MonthNum = month(Date)
+                )
+        
+        latest_date <- max(df$Date, na.rm = TRUE)
+        curr_year   <- year(latest_date)
+        prev_year   <- curr_year - 1
+        curr_month  <- month(latest_date)
+        
+        curr_month_df <- df |>
+                filter(Year == curr_year, MonthNum == curr_month) |>
+                arrange(Date)
+        
+        prev_month_df <- df |>
+                filter(Year == prev_year, MonthNum == curr_month) |>
+                arrange(Date)
+        
+        curr_n <- nrow(curr_month_df)
+        prev_n <- nrow(prev_month_df)
+        n_compare <- min(curr_n, prev_n)
+        
+        curr_cmp <- if (n_compare > 0) {
+                curr_month_df |>
+                        slice_head(n = n_compare) |>
+                        summarise_triplet()
+        } else {
+                tibble(Total = NA_real_, In_person = NA_real_, Online = NA_real_)
+        }
+        
+        prev_cmp <- if (n_compare > 0) {
+                prev_month_df |>
+                        slice_head(n = n_compare) |>
+                        summarise_triplet()
+        } else {
+                tibble(Total = NA_real_, In_person = NA_real_, Online = NA_real_)
+        }
+        
+        list(
+                curr = curr_cmp,
+                prev = prev_cmp,
+                curr_year = curr_year,
+                prev_year = prev_year,
+                curr_month_lbl = month(latest_date, label = TRUE),
+                curr_n = curr_n,
+                prev_n = prev_n,
+                n_compare = n_compare,
+                latest_date = latest_date
+        )
+}
+
+full_month_yoy_triplets <- function(base_df) {
+        latest_date <- max(base_df$Date, na.rm = TRUE)
+        current_month_start <- floor_date(latest_date, "month")
+        last_complete_month_end <- current_month_start - days(1)
+        last_complete_month_start <- floor_date(last_complete_month_end, "month")
+        prev_year_month_start <- last_complete_month_start %m-% years(1)
+        prev_year_month_end <- ceiling_date(prev_year_month_start, "month") - days(1)
+        
+        curr_month_df <- base_df |>
+                filter(Date >= last_complete_month_start, Date <= last_complete_month_end) |>
+                arrange(Date)
+        
+        prev_month_df <- base_df |>
+                filter(Date >= prev_year_month_start, Date <= prev_year_month_end) |>
+                arrange(Date)
+        
+        curr_cmp <- if (nrow(curr_month_df) > 0) {
+                summarise_triplet(curr_month_df)
+        } else {
+                tibble(Total = NA_real_, In_person = NA_real_, Online = NA_real_)
+        }
+        
+        prev_cmp <- if (nrow(prev_month_df) > 0) {
+                summarise_triplet(prev_month_df)
+        } else {
+                tibble(Total = NA_real_, In_person = NA_real_, Online = NA_real_)
+        }
+        
+        list(
+                curr = curr_cmp,
+                prev = prev_cmp,
+                curr_year = year(last_complete_month_start),
+                prev_year = year(prev_year_month_start),
+                curr_month_lbl = month(last_complete_month_start, label = TRUE),
+                curr_weeks = nrow(curr_month_df),
+                prev_weeks = nrow(prev_month_df)
+        )
+}
+
+safe_pct_change <- function(delta, prev) {
+        ifelse(is.na(prev) | prev == 0, NA_real_, delta / prev)
+}
+
+yoy_delta <- function(curr, prev) {
+        delta_total <- round(curr$Total - prev$Total, 1)
+        delta_in    <- round(curr$In_person - prev$In_person, 1)
+        delta_on    <- round(curr$Online - prev$Online, 1)
+        
+        tibble(
+                Total     = delta_total,
+                In_person = delta_in,
+                Online    = delta_on,
+                Total_percent     = safe_pct_change(delta_total, prev$Total),
+                In_person_percent = safe_pct_change(delta_in, prev$In_person),
+                Online_percent    = safe_pct_change(delta_on, prev$Online)
+        )
+}
+
+fmt_pct <- function(x) {
+        ifelse(is.na(x) | is.infinite(x), NA_character_, label_percent(0.1)(x))
+}
+
+ytd_averages <- function(df_base) {
+        latest_date <- max(df_base$Date, na.rm = TRUE)
+        
+        curr_year_start <- floor_date(latest_date, "year")
+        prev_latest_date <- latest_date %m-% years(1)
+        prev_year_start <- floor_date(prev_latest_date, "year")
+        
+        curr_yr <- df_base |>
+                filter(Date >= curr_year_start, Date <= latest_date)
+        
+        past_year <- df_base |>
+                filter(Date >= prev_year_start, Date <= prev_latest_date)
+        
+        curr_year <- year(latest_date)
+        prev_year <- year(prev_latest_date)
+        curr_month_lbl <- month(latest_date, label = TRUE)
+        
+        weekly_ave_past <- summarise(
+                past_year,
+                Total     = round(mean(Total,     na.rm = TRUE), 1),
+                In_person = round(mean(In_person, na.rm = TRUE), 1),
+                Online    = round(mean(Online,    na.rm = TRUE), 1)
+        )
+        
+        weekly_ave_curr <- summarise(
+                curr_yr,
+                Total     = round(mean(Total,     na.rm = TRUE), 2),
+                In_person = round(mean(In_person, na.rm = TRUE), 2),
+                Online    = round(mean(Online,    na.rm = TRUE), 2)
+        )
+        
+        list(
+                latest_date = latest_date,
+                prev_latest_date = prev_latest_date,
+                curr_year = curr_year,
+                prev_year = prev_year,
+                curr_month_lbl = curr_month_lbl,
+                weekly_ave_past = weekly_ave_past,
+                weekly_ave_curr = weekly_ave_curr,
+                curr_n = nrow(curr_yr),
+                prev_n = nrow(past_year)
+        )
+}
+
+make_lastweek_table <- function(lastweek) {
+        mat <- matrix(c(
+                lastweek$Total,
+                lastweek$In_person,
+                lastweek$Online
+        ), ncol = 1, byrow = TRUE)
+        
+        colnames(mat) <- "Attendance"
+        rownames(mat) <- c("Combined", "In person", "Online")
+        mat
+}
+
+make_mtd_table <- function(mtd_yoy) {
+        deltas <- yoy_delta(mtd_yoy$curr, mtd_yoy$prev)
+        
+        mat <- matrix(c(
+                mtd_yoy$curr$Total,     mtd_yoy$prev$Total,     deltas$Total,     fmt_pct(deltas$Total_percent),
+                mtd_yoy$curr$In_person, mtd_yoy$prev$In_person, deltas$In_person, fmt_pct(deltas$In_person_percent),
+                mtd_yoy$curr$Online,    mtd_yoy$prev$Online,    deltas$Online,    fmt_pct(deltas$Online_percent)
+        ), nrow = 3, byrow = TRUE)
+        
+        colnames(mat) <- c(
+                paste0(mtd_yoy$curr_month_lbl, " ", mtd_yoy$curr_year, " MTD (", mtd_yoy$curr_n, " wks)"),
+                paste0(mtd_yoy$curr_month_lbl, " ", mtd_yoy$prev_year, " Matched (", mtd_yoy$n_compare, " wks)"),
+                "Change",
+                "Percent change"
+        )
+        
+        rownames(mat) <- c("Combined", "In person", "Online")
+        mat
+}
+
+make_fullmonth_table <- function(full_yoy) {
+        deltas <- yoy_delta(full_yoy$curr, full_yoy$prev)
+        
+        mat <- matrix(c(
+                full_yoy$curr$Total,     full_yoy$prev$Total,     deltas$Total,     fmt_pct(deltas$Total_percent),
+                full_yoy$curr$In_person, full_yoy$prev$In_person, deltas$In_person, fmt_pct(deltas$In_person_percent),
+                full_yoy$curr$Online,    full_yoy$prev$Online,    deltas$Online,    fmt_pct(deltas$Online_percent)
+        ), nrow = 3, byrow = TRUE)
+        
+        colnames(mat) <- c(
+                paste0(full_yoy$curr_month_lbl, " ", full_yoy$curr_year, " Full month (", full_yoy$curr_weeks, " wks)"),
+                paste0(full_yoy$curr_month_lbl, " ", full_yoy$prev_year, " Full month (", full_yoy$prev_weeks, " wks)"),
+                "Change",
+                "Percent change"
+        )
+        rownames(mat) <- c("Combined", "In person", "Online")
+        mat
+}
+
+make_ytd_table <- function(curr_flags) {
+        chg <- tibble(
+                Total     = curr_flags$weekly_ave_curr$Total     - curr_flags$weekly_ave_past$Total,
+                In_person = curr_flags$weekly_ave_curr$In_person - curr_flags$weekly_ave_past$In_person,
+                Online    = curr_flags$weekly_ave_curr$Online    - curr_flags$weekly_ave_past$Online
+        ) |>
+                mutate(
+                        Total_percent     = safe_pct_change(Total, curr_flags$weekly_ave_past$Total),
+                        In_person_percent = safe_pct_change(In_person, curr_flags$weekly_ave_past$In_person),
+                        Online_percent    = safe_pct_change(Online, curr_flags$weekly_ave_past$Online)
+                )
+        
+        mat <- matrix(c(
+                curr_flags$weekly_ave_curr$Total,
+                curr_flags$weekly_ave_curr$In_person,
+                curr_flags$weekly_ave_curr$Online,
+                curr_flags$weekly_ave_past$Total,
+                curr_flags$weekly_ave_past$In_person,
+                curr_flags$weekly_ave_past$Online,
+                round(chg$Total, 1),
+                round(chg$In_person, 1),
+                round(chg$Online, 1),
+                fmt_pct(chg$Total_percent),
+                fmt_pct(chg$In_person_percent),
+                fmt_pct(chg$Online_percent)
+        ), ncol = 4, byrow = FALSE)
+        
+        colnames(mat) <- c(
+                paste0(curr_flags$curr_year, " YTD (", curr_flags$curr_n, " wks)"),
+                paste0(curr_flags$prev_year, " YTD (", curr_flags$prev_n, " wks)"),
+                "Change",
+                "Percent change"
+        )
+        
+        rownames(mat) <- c("Combined", "In person", "Online")
+        mat
+}
+
+make_monthly_datasets <- function(base_df) {
+        list(
+                in_person = base_df |> transmute(Date, val = In_person) |> monthly_mean(),
+                online    = base_df |> filter(Date >= as.Date("2017-12-01")) |> transmute(Date, val = Online) |> monthly_mean(),
+                total     = base_df |> transmute(Date, val = Total) |> monthly_mean()
+        )
+}
+
+# ===== SDA holidays / regressors =====
+
+make_holiday_df_weekly <- function(date_range) {
+        yrs <- seq(
+                year(min(date_range, na.rm = TRUE)) - 1,
+                year(max(date_range, na.rm = TRUE)) + 1
+        )
+        
+        wk_monday <- function(d) floor_date(as.Date(d), "week", week_start = 1)
+        
+        # Easter Saturday
+        easter_sun <- as.Date(timeDate::Easter(yrs))
+        easter_sat <- easter_sun - 1L
+        
+        # Christmas service Saturday (or Dec 25 if Saturday)
+        dec25 <- as.Date(paste0(yrs, "-12-25"))
+        wd <- wday(dec25, week_start = 1)  # Mon=1 ... Sat=6 Sun=7
+        back2sat <- (wd - 6L) %% 7L
+        christmas_service <- dec25 - back2sat
+        
+        # Graduation Saturday (Saturday before Memorial Day Monday)
+        memorial_mon <- as.Date(sapply(yrs, function(y) {
+                may <- seq.Date(as.Date(paste0(y, "-05-01")), as.Date(paste0(y, "-05-31")), by = "day")
+                tail(may[weekdays(may) == "Monday"], 1)
+        }))
+        grad_sat <- memorial_mon - 2L
+        
+        make_h <- function(name, dates) tibble(
+                holiday = name,
+                ds = unique(wk_monday(dates)),
+                lower_window = 0,
+                upper_window = 0
+        )
+        
+        bind_rows(
+                make_h("Easter_Saturday", easter_sat),
+                make_h("Christmas_Service", christmas_service),
+                make_h("Graduation_Saturday", grad_sat),
+                make_h("MemorialDay_Week", memorial_mon)
+        ) |>
+                distinct(holiday, ds, .keep_all = TRUE)
+}
+
+sda_regressors_for_dates <- function(date_vec) {
+        rng <- c(
+                min(date_vec, na.rm = TRUE) - years(1),
+                max(date_vec, na.rm = TRUE) + years(1)
+        )
+        h <- make_holiday_df_weekly(rng)
+        
+        wk <- tibble(date = as.Date(date_vec))
+        is_easter <- wk$date %in% h$ds[h$holiday == "Easter_Saturday"]
+        is_xmas   <- wk$date %in% h$ds[h$holiday == "Christmas_Service"]
+        is_grad   <- wk$date %in% h$ds[h$holiday == "Graduation_Saturday"]
+        is_memwk  <- wk$date %in% h$ds[h$holiday == "MemorialDay_Week"]
+        
+        wk |>
+                mutate(
+                        is_easter_sat = as.integer(is_easter),
+                        is_christmas_service = as.integer(is_xmas),
+                        is_graduation_sat = as.integer(is_grad),
+                        is_memorial_week = as.integer(is_memwk)
+                )
+}
+
+to_weekly_regular <- function(df, reopen_date) {
+        wk <- df %>%
+                filter(Date >= reopen_date) %>%
+                transmute(
+                        WeekStart = floor_date(Date, "week", week_start = 1),
+                        In_person, Online, Total
+                ) %>%
+                group_by(WeekStart) %>%
+                summarise(
+                        In_person = mean(In_person, na.rm = TRUE),
+                        Online    = mean(Online,    na.rm = TRUE),
+                        Total     = mean(Total,     na.rm = TRUE),
+                        .groups = "drop"
+                ) %>%
+                arrange(WeekStart)
+        
+        full_weeks <- tibble(WeekStart = seq(min(wk$WeekStart), max(wk$WeekStart), by = "1 week"))
+        wk_full <- full_weeks %>%
+                left_join(wk, by = "WeekStart") %>%
+                mutate(was_missing = if_else(is.na(Total) & is.na(In_person) & is.na(Online), 1L, 0L))
+        
+        wk_full %>%
+                mutate(
+                        In_person = imputeTS::na_interpolation(In_person, option = "linear"),
+                        Online    = imputeTS::na_interpolation(Online,    option = "linear"),
+                        Total     = imputeTS::na_interpolation(Total,     option = "linear")
+                )
+}
+
+build_series_tbl <- function(wk_regular_df, which_series = c("total", "in_person", "online")) {
+        which_series <- match.arg(which_series)
+        col <- switch(
+                which_series,
+                in_person = "In_person",
+                online    = "Online",
+                total     = "Total"
+        )
+        
+        base <- wk_regular_df %>% transmute(date = WeekStart, value = .data[[col]])
+        regs <- sda_regressors_for_dates(base$date) %>% select(-date)
+        bind_cols(base, regs)
+}
+
+make_future_xreg <- function(series_tbl, horizon_weeks) {
+        future_dates <- timetk::future_frame(
+                series_tbl,
+                .date_var = date,
+                .length_out = horizon_weeks,
+                .bind_data = FALSE
+        )
+        future_regs <- sda_regressors_for_dates(future_dates$date) %>% select(-date)
+        bind_cols(future_dates, future_regs)
+}
+
+compute_event_uplifts <- function(series_tbl, lookback_years = 3) {
+        series_tbl <- series_tbl %>%
+                mutate(
+                        Year = lubridate::year(date),
+                        Month = lubridate::month(date)
+                )
+        
+        dec_base <- series_tbl %>%
+                filter(Month == 12) %>%
+                group_by(Year) %>%
+                summarise(base = median(value, na.rm = TRUE), .groups = "drop")
+        
+        may_base <- series_tbl %>%
+                filter(Month == 5) %>%
+                group_by(Year) %>%
+                summarise(base = median(value, na.rm = TRUE), .groups = "drop")
+        
+        marapr_base <- series_tbl %>%
+                filter(Month %in% c(3, 4)) %>%
+                group_by(Year) %>%
+                summarise(base = median(value, na.rm = TRUE), .groups = "drop")
+        
+        learn_event <- function(flag_col, base_tbl) {
+                ev <- series_tbl %>% filter(.data[[flag_col]] == 1)
+                if (nrow(ev) == 0) {
+                        return(list(add = 0, mult = 0, max = NA_real_, med3 = NA_real_))
+                }
+                
+                ev_with_base <- ev %>%
+                        left_join(base_tbl, by = "Year") %>%
+                        mutate(
+                                delta = value - base,
+                                ratio = ifelse(is.finite(base) & base > 0, value / base - 1, NA_real_)
+                        )
+                
+                yrs <- sort(unique(ev$Year), decreasing = TRUE)
+                yrs_sel <- head(yrs, lookback_years)
+                med3 <- suppressWarnings(stats::median(ev$value[ev$Year %in% yrs_sel], na.rm = TRUE))
+                
+                list(
+                        add  = suppressWarnings(stats::median(ev_with_base$delta, na.rm = TRUE) %||% 0),
+                        mult = suppressWarnings(stats::median(ev_with_base$ratio, na.rm = TRUE) %||% 0),
+                        max  = suppressWarnings(max(ev$value, na.rm = TRUE)),
+                        med3 = if (is.finite(med3)) med3 else NA_real_
+                )
+        }
+        
+        easter <- learn_event("is_easter_sat", marapr_base)
+        xmas   <- learn_event("is_christmas_service", dec_base)
+        grad   <- learn_event("is_graduation_sat", may_base)
+        
+        for (nm in c("add", "mult")) {
+                if (!is.finite(easter[[nm]])) easter[[nm]] <- 0
+                if (!is.finite(xmas[[nm]]))   xmas[[nm]]   <- 0
+                if (!is.finite(grad[[nm]]))   grad[[nm]]   <- 0
+        }
+        
+        list(easter = easter, xmas = xmas, grad = grad)
+}
+
+apply_event_uplifts <- function(fc_all, future_tbl, uplifts,
+                                grad_add_shrink = 0.60,
+                                grad_mult_shrink = 0.25,
+                                grad_cap_buffer = 0.02,
+                                min_mult_easter = 0.15,
+                                min_mult_xmas   = 0.15,
+                                min_mult_grad   = 0.05) {
+        if (!(".conf_lo" %in% names(fc_all))) fc_all$.conf_lo <- NA_real_
+        if (!(".conf_hi" %in% names(fc_all))) fc_all$.conf_hi <- NA_real_
+        
+        build_adj <- future_tbl %>%
+                transmute(
+                        .index = date,
+                        mult_easter = 1 + max(uplifts$easter$mult, min_mult_easter),
+                        mult_xmas   = 1 + max(uplifts$xmas$mult,   min_mult_xmas),
+                        mult_grad   = 1 + max(uplifts$grad$mult * grad_mult_shrink, min_mult_grad),
+                        add_easter  = uplifts$easter$add,
+                        add_xmas    = uplifts$xmas$add,
+                        add_grad    = uplifts$grad$add * grad_add_shrink,
+                        f_easter    = is_easter_sat,
+                        f_xmas      = is_christmas_service,
+                        f_grad      = is_graduation_sat
+                ) %>%
+                mutate(
+                        mult_total = (ifelse(f_easter == 1, mult_easter, 1)) *
+                                (ifelse(f_xmas == 1, mult_xmas, 1)) *
+                                (ifelse(f_grad == 1, mult_grad, 1)),
+                        add_total  = ifelse(f_easter == 1, add_easter, 0) +
+                                ifelse(f_xmas == 1, add_xmas, 0) +
+                                ifelse(f_grad == 1, add_grad, 0)
+                ) %>%
+                select(.index, mult_total, add_total, f_grad)
+        
+        out <- fc_all %>%
+                left_join(build_adj, by = ".index") %>%
+                mutate(
+                        mult_total = ifelse(.key == "prediction", coalesce(mult_total, 1), 1),
+                        add_total  = ifelse(.key == "prediction", coalesce(add_total, 0), 0),
+                        .value   = (.value   * mult_total) + add_total,
+                        .conf_lo = (.conf_lo * mult_total) + add_total,
+                        .conf_hi = (.conf_hi * mult_total) + add_total
+                )
+        
+        if (is.finite(uplifts$grad$max) && uplifts$grad$max > 0) {
+                cap_val <- uplifts$grad$max * (1 + grad_cap_buffer)
+                out <- out %>%
+                        mutate(
+                                .value   = ifelse(.key == "prediction" & coalesce(f_grad, 0) == 1,
+                                                  pmin(.value, cap_val), .value),
+                                .conf_hi = ifelse(.key == "prediction" & coalesce(f_grad, 0) == 1,
+                                                  pmin(.conf_hi, cap_val), .conf_hi),
+                                .conf_lo = pmin(.conf_lo, .value)
+                        )
+        }
+        
+        out %>% select(-mult_total, -add_total, -f_grad)
+}
+
+fit_ensemble_weighted <- function(series_tbl, holidays_df, horizon_weeks = 13, conf = 0.80) {
+        set.seed(123)
+        
+        split <- time_series_split(series_tbl, assess = horizon_weeks, cumulative = TRUE)
+        
+        m_prophet <- prophet_reg(
+                seasonality_yearly = TRUE,
+                seasonality_weekly = TRUE,
+                changepoint_num = 25
+        ) %>%
+                set_engine(
+                        "prophet",
+                        holidays = holidays_df,
+                        holidays_prior_scale = 35,
+                        seasonality_mode = "multiplicative",
+                        changepoint_prior_scale = 0.1
+                ) %>%
+                fit(value ~ date, data = training(split))
+        
+        m_arima <- arima_reg() %>%
+                set_engine("auto_arima") %>%
+                fit(value ~ date, data = training(split))
+        
+        m_arima_x <- arima_reg() %>%
+                set_engine("auto_arima") %>%
+                fit(
+                        value ~ date + is_easter_sat + is_christmas_service + is_graduation_sat + is_memorial_week,
+                        data = training(split)
+                )
+        
+        m_ets <- exp_smoothing() %>%
+                set_engine("ets") %>%
+                fit(value ~ date, data = training(split))
+        
+        models_tbl <- modeltime_table(m_prophet, m_arima, m_arima_x, m_ets)
+        
+        cal <- models_tbl %>% modeltime_calibrate(new_data = testing(split))
+        acc <- cal %>% modeltime_accuracy() %>% normalize_metric_names()
+        
+        acc_keep <- acc %>% dplyr::filter(is.finite(rmse))
+        keep_ids <- acc_keep$model_id
+        
+        if (length(keep_ids) == 0) {
+                best_id <- acc %>% dplyr::arrange(rmse) %>% dplyr::slice(1) %>% dplyr::pull(model_id)
+                if (length(best_id) == 0 || is.na(best_id)) best_id <- models_tbl$.model_id[[1]]
+                ens_tbl <- models_tbl %>% dplyr::filter(.model_id == best_id)
+                refit_ens <- ens_tbl %>% modeltime_refit(data = series_tbl)
+                acc$weight <- ifelse(acc$model_id == best_id, 1, NA_real_)
+                return(list(split = split, accuracy = acc, refit = refit_ens, conf = conf))
+        }
+        
+        cal_keep <- cal %>%
+                dplyr::filter(.model_id %in% keep_ids) %>%
+                dplyr::arrange(match(.model_id, keep_ids))
+        
+        inv_rmse <- 1 / acc_keep$rmse
+        inv_rmse[!is.finite(inv_rmse)] <- NA_real_
+        if (any(is.na(inv_rmse))) inv_rmse[is.na(inv_rmse)] <- min(inv_rmse, na.rm = TRUE) * 0.5
+        w <- inv_rmse / sum(inv_rmse)
+        
+        desc <- tolower(acc_keep$model_desc)
+        is_prophet <- grepl("prophet", desc)
+        is_arimax  <- grepl("arima", desc) & grepl("xreg", desc)
+        
+        w_min <- numeric(length(w))
+        if (any(is_prophet)) w_min[is_prophet] <- 0.35
+        if (any(is_arimax))  w_min[is_arimax]  <- 0.30
+        
+        total_floor <- sum(w_min)
+        if (total_floor > 0 && total_floor < 0.95) {
+                w_rescaled <- (1 - total_floor) * (w / sum(w))
+                w <- w_rescaled + w_min
+                w <- w / sum(w)
+        }
+        
+        if (length(w) == 1 || !ok_ens) {
+                solo_id <- keep_ids[[1]]
+                ens_tbl <- models_tbl %>% dplyr::filter(.model_id == solo_id)
+                refit_ens <- ens_tbl %>% modeltime_refit(data = series_tbl)
+                acc$weight <- ifelse(acc$model_id == solo_id, 1, NA_real_)
+        } else {
+                ens_obj <- modeltime.ensemble::ensemble_weighted(cal_keep, w)
+                ens_tbl <- modeltime_table(ens_obj)
+                refit_ens <- ens_tbl %>% modeltime_refit(data = series_tbl)
+                acc <- acc %>%
+                        dplyr::left_join(tibble(model_id = keep_ids, weight = round(w, 4)), by = "model_id")
+        }
+        
+        list(split = split, accuracy = acc, refit = refit_ens, conf = conf)
+}
+
+make_forecast <- function(refit_ens, series_tbl, horizon_weeks = 13, conf = 0.80, uplifts = NULL) {
+        future_tbl <- make_future_xreg(series_tbl, horizon_weeks)
+        
+        fc <- refit_ens %>%
+                modeltime_forecast(
+                        new_data = future_tbl,
+                        actual_data = series_tbl,
+                        conf_interval = conf
+                ) %>%
+                normalize_forecast_cols()
+        
+        if (!is.null(uplifts)) {
+                fc <- apply_event_uplifts(fc_all = fc, future_tbl = future_tbl, uplifts = uplifts)
+        }
+        
+        fc
+}
+
+## ------------------------------
+## 4) Attendance module (UI)
+## ------------------------------
+attendanceTabUI <- function(id, tab_title) {
+        ns <- NS(id)
+        
+        tabPanel(
+                tab_title,
+                sidebarLayout(
+                        sidebarPanel(
+                                selectInput(
+                                        ns("dataset"),
+                                        label = h3("Attendance data set"),
+                                        choices = list("Total" = "total", "In Person" = "in_person", "Online" = "online"),
+                                        selected = "total"
+                                ),
+                                p("Choose in-person, online, or total attendance."),
+                                selectInput(
+                                        ns("month"),
+                                        label = h3("Month"),
+                                        choices = list(
+                                                "All" = "all", "January" = "jan", "February" = "feb", "March" = "mar",
+                                                "April" = "apr", "May" = "may", "June" = "jun", "July" = "jul",
+                                                "August" = "aug", "September" = "sep", "October" = "oct",
+                                                "November" = "nov", "December" = "dec"
+                                        ),
+                                        selected = "all"
+                                ),
+                                p("Filter the seasonal plot by month")
+                        ),
+                        mainPanel(
+                                h3("By the Numbers"),
+                                uiOutput(ns("lastweek_header")),
+                                htmlOutput(ns("lastweek_table")),
+                                h4("Month-to-date weekly average (matched weeks year-over-year)"),
+                                htmlOutput(ns("mtd_table")),
+                                h4("Full-month weekly average year-over-year (most recently completed month)"),
+                                htmlOutput(ns("fullmonth_table")),
+                                h4("Year-to-date attendance per week"),
+                                htmlOutput(ns("ytd_table")),
+                                h3("Attendance Over Time"),
+                                plotlyOutput(ns("seasonal")),
+                                h3("Seasonal attendance patterns"),
+                                plotlyOutput(ns("spaghetti"))
+                        )
+                )
+        )
+}
+
+## --------------------------------
+## 5) Attendance module (Server)
+## --------------------------------
+attendanceTabServer <- function(id, base_df, monthly_sets, curr_flags) {
+        moduleServer(id, function(input, output, session) {
+                
+                month_key <- c(
+                        all = NA, jan = 1, feb = 2, mar = 3, apr = 4, may = 5, jun = 6,
+                        jul = 7, aug = 8, sep = 9, oct = 10, nov = 11, dec = 12
+                )
+                
+                sel_months <- reactive({
+                        sel <- month_key[[input$month]]
+                        if (is.na(sel)) 1:12 else sel
+                })
+                
+                lw <- last_week_triplet(base_df)
+                mtd_yoy <- matched_mtd_yoy_triplets(base_df)
+                full_yoy <- full_month_yoy_triplets(base_df)
+                ytd_tbl <- make_ytd_table(curr_flags)
+                
+                output$lastweek_header <- renderUI({
+                        h4(last_week_label(base_df))
+                })
+                
+                output$lastweek_table <- renderUI({
+                        tbl <- kbl(make_lastweek_table(lw), row.names = TRUE) |>
+                                kable_styling(bootstrap_options = c("striped"), full_width = FALSE) |>
+                                column_spec(1, bold = TRUE)
+                        HTML(as.character(tbl))
+                })
+                
+                output$mtd_table <- renderUI({
+                        tbl <- kbl(make_mtd_table(mtd_yoy), row.names = TRUE) |>
+                                kable_styling(bootstrap_options = c("striped"), full_width = FALSE) |>
+                                add_header_above(c(" " = 1, "Matched month-to-date weekly average" = 2, "Year-over-year" = 2)) |>
+                                column_spec(1, bold = TRUE)
+                        HTML(as.character(tbl))
+                })
+                
+                output$fullmonth_table <- renderUI({
+                        tbl <- kbl(make_fullmonth_table(full_yoy), row.names = TRUE) |>
+                                kable_styling(bootstrap_options = c("striped"), full_width = FALSE) |>
+                                add_header_above(c(" " = 1, "Full-month weekly average" = 2, "Year-over-year" = 2)) |>
+                                column_spec(1, bold = TRUE)
+                        HTML(as.character(tbl))
+                })
+                
+                output$ytd_table <- renderUI({
+                        tbl <- kbl(ytd_tbl, row.names = TRUE) |>
+                                kable_styling(bootstrap_options = c("striped"), full_width = FALSE) |>
+                                add_header_above(c(" " = 1, "Year-to-date weekly average" = 2, " " = 1, " " = 1)) |>
+                                column_spec(1, bold = TRUE)
+                        HTML(as.character(tbl))
+                })
+                
+                ds_reactive <- reactive({
+                        switch(
+                                input$dataset,
+                                in_person = monthly_sets$in_person,
+                                online    = monthly_sets$online,
+                                total     = monthly_sets$total
+                        )
+                })
+                
+                output$seasonal <- renderPlotly({
+                        d <- ds_reactive() |> filter(month(Date) %in% sel_months())
+                        
+                        gp <- ggplot(d, aes(Date, attendance)) +
+                                theme_classic() +
+                                geom_point() +
+                                geom_line() +
+                                geom_smooth(method = "loess", formula = "y~x", col = "red") +
+                                labs(
+                                        title = "Weekly average attendance by month",
+                                        x = "Date",
+                                        y = "Average attendance"
+                                )
+                        
+                        ggplotly(gp)
+                })
+                
+                output$spaghetti <- renderPlotly({
+                        d <- ds_reactive()
+                        
+                        s <- d |>
+                                mutate(Year = factor(year(Date)), Date = update(Date, year = 1)) |>
+                                ggplot(aes(Date, attendance, colour = Year)) +
+                                scale_x_date(date_breaks = "1 month", date_labels = "%b") +
+                                geom_line(aes(group = Year), colour = "black", alpha = 0.1) +
+                                geom_line(data = function(x) filter(x, Year == curr_flags$prev_year), lwd = 0.5) +
+                                geom_line(data = function(x) filter(x, Year == curr_flags$curr_year), lwd = 1) +
+                                theme_bw() +
+                                labs(y = "Average attendance per week", x = "Month")
+                        
+                        ggplotly(s)
+                })
+        })
+}
+
+## ------------------------------
+## 6) Forecast module (UI)
+## ------------------------------
+forecastTabUI <- function(id) {
+        ns <- NS(id)
+        
+        tabPanel(
+                "Forecast",
+                sidebarLayout(
+                        sidebarPanel(
+                                selectInput(
+                                        ns("fc_service"),
+                                        "Service",
+                                        choices = c("Overall" = "overall", "Ascent" = "ascent", "Sanctuary" = "sanct"),
+                                        selected = "overall"
+                                ),
+                                selectInput(
+                                        ns("fc_dataset"),
+                                        "Data set",
+                                        choices = c("Total" = "total", "In Person" = "in_person", "Online" = "online"),
+                                        selected = "total"
+                                ),
+                                sliderInput(
+                                        ns("fc_horizon"),
+                                        "Forecast horizon (weeks)",
+                                        min = 8,
+                                        max = 52,
+                                        value = 26,
+                                        step = 1
+                                ),
+                                helpText("Performance-weighted ensemble: Prophet + ARIMA (+xregs) + ETS with SDA holiday effects and 80% intervals + event uplifts.")
+                        ),
+                        mainPanel(
+                                h3("Weekly Attendance Forecast (2 to 12 months)"),
+                                plotlyOutput(ns("fc_plot")),
+                                br(),
+                                h4("Backtest accuracy (last horizon)"),
+                                tableOutput(ns("fc_accuracy"))
+                        )
+                )
+        )
+}
+
+## ------------------------------
+## 7) Forecast module (Server)
+## ------------------------------
+forecastTabServer <- function(id, Weekly_data, svc_map) {
+        moduleServer(id, function(input, output, session) {
+                
+                get_base_df <- reactive({
+                        switch(
+                                input$fc_service,
+                                overall = make_base(Weekly_data, svc_map$overall),
+                                ascent  = make_base(Weekly_data, svc_map$ascent),
+                                sanct   = make_base(Weekly_data, svc_map$sanct)
+                        )
+                })
+                
+                wk_regular <- reactive({
+                        to_weekly_regular(get_base_df(), as.Date("2021-04-03"))
+                })
+                
+                series_tbl <- reactive({
+                        build_series_tbl(wk_regular(), input$fc_dataset)
+                })
+                
+                holidays_df <- reactive({
+                        make_holiday_df_weekly(series_tbl()$date)
+                })
+                
+                event_uplifts <- reactive({
+                        compute_event_uplifts(series_tbl())
+                })
+                
+                .model_cache <- reactiveVal(new.env(parent = emptyenv()))
+                
+                get_fit <- reactive({
+                        key <- paste(input$fc_service, input$fc_dataset, input$fc_horizon, sep = "_")
+                        cache <- .model_cache()
+                        
+                        if (!exists(key, envir = cache)) {
+                                fit <- fit_ensemble_weighted(
+                                        series_tbl = series_tbl(),
+                                        holidays_df = holidays_df(),
+                                        horizon_weeks = input$fc_horizon,
+                                        conf = 0.80
+                                )
+                                assign(key, fit, envir = cache)
+                        }
+                        
+                        get(key, envir = cache)
+                })
+                
+                output$fc_accuracy <- renderTable({
+                        acc <- get_fit()$accuracy |> normalize_metric_names()
+                        
+                        acc %>%
+                                dplyr::select(
+                                        model_desc = dplyr::any_of(c("model_desc", ".model_desc")),
+                                        rmse, mae, mape, rsq, weight
+                                ) %>%
+                                dplyr::mutate(dplyr::across(where(is.numeric), ~ round(.x, 3)))
+                })
+                
+                output$fc_plot <- renderPlotly({
+                        fit <- get_fit()
+                        
+                        fc <- make_forecast(
+                                refit_ens = fit$refit,
+                                series_tbl = series_tbl(),
+                                horizon_weeks = input$fc_horizon,
+                                conf = fit$conf,
+                                uplifts = event_uplifts()
+                        )
+                        
+                        act  <- dplyr::filter(fc, .key == "actual")
+                        pred <- dplyr::filter(fc, .key == "prediction")
+                        
+                        have_ci_cols <- all(c(".conf_lo", ".conf_hi") %in% names(pred))
+                        need_ci_fallback <- !have_ci_cols || !any(is.finite(pred$.conf_lo) & is.finite(pred$.conf_hi))
+                        
+                        if (need_ci_fallback && nrow(pred)) {
+                                acc <- fit$accuracy
+                                names(acc) <- gsub("^\\.", "", names(acc))
+                                acc_ok <- acc %>% dplyr::filter(is.finite(rmse))
+                                
+                                if (nrow(acc_ok) > 0) {
+                                        if ("weight" %in% names(acc_ok) && any(is.finite(acc_ok$weight))) {
+                                                wts <- acc_ok$weight
+                                                wts[!is.finite(wts)] <- 0
+                                                if (sum(wts) == 0) wts <- rep(1 / nrow(acc_ok), nrow(acc_ok))
+                                                rmse_eff <- sum(wts * acc_ok$rmse)
+                                        } else {
+                                                rmse_eff <- mean(acc_ok$rmse)
+                                        }
+                                        
+                                        z80 <- 1.281552
+                                        pred$.conf_lo <- pred$.value - z80 * rmse_eff
+                                        pred$.conf_hi <- pred$.value + z80 * rmse_eff
+                                }
+                        }
+                        
+                        p <- plotly::plot_ly()
+                        
+                        if (nrow(pred)) {
+                                if (all(c(".conf_lo", ".conf_hi") %in% names(pred)) &&
+                                    any(is.finite(pred$.conf_lo) & is.finite(pred$.conf_hi))) {
+                                        p <- p %>%
+                                                add_ribbons(
+                                                        data = pred,
+                                                        x = ~.index,
+                                                        ymin = ~.conf_lo,
+                                                        ymax = ~.conf_hi,
+                                                        name = "80% CI",
+                                                        hoverinfo = "skip",
+                                                        opacity = 0.25
+                                                )
+                                }
+                        }
+                        
+                        if (nrow(act)) {
+                                p <- p %>% add_lines(data = act, x = ~.index, y = ~.value, name = "Actuals")
+                        }
+                        
+                        if (nrow(pred)) {
+                                p <- p %>% add_lines(data = pred, x = ~.index, y = ~.value, name = "Forecast")
+                        }
+                        
+                        p %>%
+                                layout(
+                                        title = "Weekly Attendance Forecast (80% confidence interval + event uplifts)",
+                                        xaxis = list(title = "Week"),
+                                        yaxis = list(title = "Attendance"),
+                                        legend = list(orientation = "h", x = 0, y = 1.1)
+                                )
+                })
+        })
+}
+
+## --------------------------
+## 8) UI
+## --------------------------
+ui <- fluidPage(
+        titlePanel("Kettering SDA Church Attendance"),
+        tabsetPanel(
+                attendanceTabUI("overall",   "Overall"),
+                attendanceTabUI("ascent",    "Ascent"),
+                attendanceTabUI("sanctuary", "Sanctuary"),
+                forecastTabUI("forecast")
+        ),
+        hr(),
+        h4("Created by: Jim Milks"),
+        "Version 6", br(),
+        "Updated 15 April 2026", br(),
+        "Code and data available at:",
+        a(
+                href = "https://github.com/jrmilks74/KetSDA/tree/main",
+                "https://github.com/jrmilks74/KetSDA/tree/main"
+        ),
+        br(),
+        "Data updated every Monday"
+)
+
+## --------------------------
+## 9) Server
+## --------------------------
+server <- function(input, output, session) {
+        # OVERALL
+        overall_base <- make_base(Weekly_data, svc_map$overall)
+        overall_flags <- ytd_averages(overall_base)
+        overall_monthly <- make_monthly_datasets(overall_base)
+        attendanceTabServer("overall", overall_base, overall_monthly, overall_flags)
+        
+        # ASCENT
+        ascent_base <- make_base(Weekly_data, svc_map$ascent)
+        ascent_flags <- ytd_averages(ascent_base)
+        ascent_monthly <- make_monthly_datasets(ascent_base)
+        attendanceTabServer("ascent", ascent_base, ascent_monthly, ascent_flags)
+        
+        # SANCTUARY
+        sanct_base <- make_base(Weekly_data, svc_map$sanct)
+        sanct_flags <- ytd_averages(sanct_base)
+        sanct_monthly <- make_monthly_datasets(sanct_base)
+        attendanceTabServer("sanctuary", sanct_base, sanct_monthly, sanct_flags)
+        
+        # FORECAST
+        forecastTabServer("forecast", Weekly_data, svc_map)
+}
+
 shinyApp(ui, server)
