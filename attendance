@@ -117,29 +117,6 @@ summarise_triplet <- function(df) {
         )
 }
 
-last_week_triplet <- function(base_df) {
-        
-        lw <- base_df |>
-                filter(!is.na(Date)) |>
-                arrange(Date) |>
-                slice_tail(n = 1)
-        tibble(
-                Total     = lw$Total,
-                In_person = lw$In_person,
-                Online    = lw$Online
-        )
-}
-
-last_week_label <- function(base_df) {
-        last_dt <- suppressWarnings(max(base_df$Date, na.rm = TRUE))
-        
-        if (is.na(last_dt)) {
-                return("Last week")
-        }
-        
-        paste0("Last week (", format(last_dt, "%B %d, %Y"), ")")
-}
-
 matched_mtd_yoy_triplets <- function(base_df) {
         df <- base_df |>
                 arrange(Date) |>
@@ -300,18 +277,6 @@ ytd_averages <- function(df_base) {
         )
 }
 
-make_lastweek_table <- function(lastweek) {
-        mat <- matrix(c(
-                lastweek$Total,
-                lastweek$In_person,
-                lastweek$Online
-        ), ncol = 1, byrow = TRUE)
-        
-        colnames(mat) <- "Attendance"
-        rownames(mat) <- c("Combined", "In person", "Online")
-        mat
-}
-
 make_mtd_table <- function(mtd_yoy) {
         deltas <- yoy_delta(mtd_yoy$curr, mtd_yoy$prev)
         
@@ -399,47 +364,6 @@ make_monthly_datasets <- function(base_df) {
 
 # ===== SDA holidays / regressors =====
 
-make_holiday_df_weekly <- function(date_range) {
-        yrs <- seq(
-                year(min(date_range, na.rm = TRUE)) - 1,
-                year(max(date_range, na.rm = TRUE)) + 1
-        )
-        
-        wk_monday <- function(d) floor_date(as.Date(d), "week", week_start = 1)
-        
-        # Easter Saturday
-        easter_sun <- as.Date(timeDate::Easter(yrs))
-        easter_sat <- easter_sun - 1L
-        
-        # Christmas service Saturday (or Dec 25 if Saturday)
-        dec25 <- as.Date(paste0(yrs, "-12-25"))
-        wd <- wday(dec25, week_start = 1)  # Mon=1 ... Sat=6 Sun=7
-        back2sat <- (wd - 6L) %% 7L
-        christmas_service <- dec25 - back2sat
-        
-        # Graduation Saturday (Saturday before Memorial Day Monday)
-        memorial_mon <- as.Date(sapply(yrs, function(y) {
-                may <- seq.Date(as.Date(paste0(y, "-05-01")), as.Date(paste0(y, "-05-31")), by = "day")
-                tail(may[weekdays(may) == "Monday"], 1)
-        }))
-        grad_sat <- memorial_mon - 2L
-        
-        make_h <- function(name, dates) tibble(
-                holiday = name,
-                ds = unique(wk_monday(dates)),
-                lower_window = 0,
-                upper_window = 0
-        )
-        
-        bind_rows(
-                make_h("Easter_Saturday", easter_sat),
-                make_h("Christmas_Service", christmas_service),
-                make_h("Graduation_Saturday", grad_sat),
-                make_h("MemorialDay_Week", memorial_mon)
-        ) |>
-                distinct(holiday, ds, .keep_all = TRUE)
-}
-
 sda_regressors_for_dates <- function(date_vec) {
         rng <- c(
                 min(date_vec, na.rm = TRUE) - years(1),
@@ -516,7 +440,7 @@ make_future_xreg <- function(series_tbl, horizon_weeks) {
         bind_cols(future_dates, future_regs)
 }
 
-compute_event_uplifts <- function(series_tbl, lookback_years = 3) {
+.compute_event_uplifts_base <- function(series_tbl, lookback_years = 3) {
         series_tbl <- series_tbl %>%
                 mutate(
                         Year = lubridate::year(date),
@@ -576,13 +500,13 @@ compute_event_uplifts <- function(series_tbl, lookback_years = 3) {
         list(easter = easter, xmas = xmas, grad = grad)
 }
 
-apply_event_uplifts <- function(fc_all, future_tbl, uplifts,
-                                grad_add_shrink = 0.60,
-                                grad_mult_shrink = 0.25,
-                                grad_cap_buffer = 0.02,
-                                min_mult_easter = 0.15,
-                                min_mult_xmas   = 0.15,
-                                min_mult_grad   = 0.05) {
+.apply_event_uplifts_base <- function(fc_all, future_tbl, uplifts,
+                                      grad_add_shrink = 0.60,
+                                      grad_mult_shrink = 0.25,
+                                      grad_cap_buffer = 0.02,
+                                      min_mult_easter = 0.15,
+                                      min_mult_xmas   = 0.15,
+                                      min_mult_grad   = 0.05) {
         if (!(".conf_lo" %in% names(fc_all))) fc_all$.conf_lo <- NA_real_
         if (!(".conf_hi" %in% names(fc_all))) fc_all$.conf_hi <- NA_real_
         
@@ -634,7 +558,7 @@ apply_event_uplifts <- function(fc_all, future_tbl, uplifts,
         out %>% select(-mult_total, -add_total, -f_grad)
 }
 
-fit_ensemble_weighted <- function(series_tbl, holidays_df, horizon_weeks = 13, conf = 0.80) {
+.fit_ensemble_weighted_base <- function(series_tbl, holidays_df, horizon_weeks = 13, conf = 0.80) {
         set.seed(123)
         
         split <- time_series_split(series_tbl, assess = horizon_weeks, cumulative = TRUE)
@@ -744,150 +668,419 @@ make_forecast <- function(refit_ens, series_tbl, horizon_weeks = 13, conf = 0.80
 }
 
 ## ------------------------------
-## 4) Attendance module (UI)
+## 4) Attendance dashboard (UI)
 ## ------------------------------
-attendanceTabUI <- function(id, tab_title) {
+attendanceOverviewUI <- function(id) {
         ns <- NS(id)
         
         tabPanel(
-                tab_title,
-                sidebarLayout(
-                        sidebarPanel(
-                                selectInput(
-                                        ns("dataset"),
-                                        label = h3("Attendance data set"),
-                                        choices = list("Total" = "total", "In Person" = "in_person", "Online" = "online"),
-                                        selected = "total"
+                "Overview",
+                div(
+                        class = "dashboard-section",
+                        div(
+                                class = "section-heading",
+                                div(
+                                        span(class = "eyebrow", "AT A GLANCE"),
+                                        h2("Attendance overview")
                                 ),
-                                p("Choose in-person, online, or total attendance."),
+                                span(class = "period-label", textOutput(ns("overview_period"), inline = TRUE))
+                        ),
+                        fluidRow(
+                                column(4, uiOutput(ns("lastweek_card"))),
+                                column(4, uiOutput(ns("mtd_card"))),
+                                column(4, uiOutput(ns("ytd_card")))
+                        ),
+                        div(
+                                class = "content-card chart-card",
+                                div(
+                                        class = "section-heading chart-heading",
+                                        div(
+                                                span(class = "eyebrow", "WEEKLY ATTENDANCE"),
+                                                h3(textOutput(ns("overview_chart_title"), inline = TRUE))
+                                        )
+                                ),
+                                plotlyOutput(ns("overview_trend"), height = "390px")
+                        ),
+                        tags$details(
+                                class = "content-card comparison-details",
+                                tags$summary("View detailed period comparisons"),
+                                p(class = "detail-intro", "These tables include Total, In person, and Online attendance so the underlying comparison remains easy to audit."),
+                                h4("Month-to-date weekly average — matched service weeks"),
+                                htmlOutput(ns("mtd_table")),
+                                h4("Most recently completed month"),
+                                htmlOutput(ns("fullmonth_table")),
+                                h4("Year-to-date weekly average"),
+                                htmlOutput(ns("ytd_table"))
+                        )
+                )
+        )
+}
+
+attendanceTrendsUI <- function(id) {
+        ns <- NS(id)
+        
+        tabPanel(
+                "Trends",
+                div(
+                        class = "dashboard-section",
+                        div(
+                                class = "section-heading",
+                                div(
+                                        span(class = "eyebrow", "EXPLORE THE PATTERN"),
+                                        h2("Attendance trends")
+                                )
+                        ),
+                        div(
+                                class = "content-card trend-filter-card",
                                 selectInput(
                                         ns("month"),
-                                        label = h3("Month"),
-                                        choices = list(
-                                                "All" = "all", "January" = "jan", "February" = "feb", "March" = "mar",
-                                                "April" = "apr", "May" = "may", "June" = "jun", "July" = "jul",
-                                                "August" = "aug", "September" = "sep", "October" = "oct",
-                                                "November" = "nov", "December" = "dec"
+                                        label = "Month shown in the long-term trend",
+                                        choices = c(
+                                                "All months" = "all", "January" = "jan", "February" = "feb",
+                                                "March" = "mar", "April" = "apr", "May" = "may",
+                                                "June" = "jun", "July" = "jul", "August" = "aug",
+                                                "September" = "sep", "October" = "oct", "November" = "nov",
+                                                "December" = "dec"
                                         ),
-                                        selected = "all"
+                                        selected = "all",
+                                        width = "280px"
                                 ),
-                                p("Filter the seasonal plot by month")
+                                p(class = "control-help", "This filter applies only to the chart immediately below.")
                         ),
-                        mainPanel(
-                                h3("By the Numbers"),
-                                uiOutput(ns("lastweek_header")),
-                                htmlOutput(ns("lastweek_table")),
-                                h4("Month-to-date weekly average (matched weeks year-over-year)"),
-                                htmlOutput(ns("mtd_table")),
-                                h4("Full-month weekly average year-over-year (most recently completed month)"),
-                                htmlOutput(ns("fullmonth_table")),
-                                h4("Year-to-date attendance per week"),
-                                htmlOutput(ns("ytd_table")),
-                                h3("Attendance Over Time"),
-                                plotlyOutput(ns("seasonal")),
-                                h3("Seasonal attendance patterns"),
-                                plotlyOutput(ns("spaghetti"))
+                        div(
+                                class = "content-card chart-card",
+                                h3(textOutput(ns("trend_chart_title"), inline = TRUE)),
+                                plotlyOutput(ns("seasonal"), height = "410px")
+                        ),
+                        div(
+                                class = "content-card chart-card",
+                                h3("Current year, last year, and the seasonal benchmark"),
+                                p(class = "chart-description", "The current year is solid red and the previous year is dashed purple. The dark-gray line is the monthly median from up to 10 prior years; the light-gray band contains the central 80% of those historical observations."),
+                                plotlyOutput(ns("spaghetti"), height = "410px")
                         )
                 )
         )
 }
 
 ## --------------------------------
-## 5) Attendance module (Server)
+## 5) Attendance dashboard (Server)
 ## --------------------------------
-attendanceTabServer <- function(id, base_df, monthly_sets, curr_flags) {
+attendanceDashboardServer <- function(id, Weekly_data, svc_map, service_reactive, metric_reactive) {
         moduleServer(id, function(input, output, session) {
-                
                 month_key <- c(
                         all = NA, jan = 1, feb = 2, mar = 3, apr = 4, may = 5, jun = 6,
                         jul = 7, aug = 8, sep = 9, oct = 10, nov = 11, dec = 12
                 )
+                metric_columns <- c(total = "Total", in_person = "In_person", online = "Online")
+                metric_labels <- c(total = "Total", in_person = "In-person", online = "Online")
+                metric_colors <- c(total = "#58a8aa", in_person = "#6ea8d7", online = "#d9a65a")
+                service_labels <- c(overall = "Overall", ascent = "Ascent", sanct = "Sanctuary")
                 
-                sel_months <- reactive({
-                        sel <- month_key[[input$month]]
-                        if (is.na(sel)) 1:12 else sel
+                base_df <- reactive({
+                        make_base(Weekly_data, svc_map[[service_reactive()]])
                 })
                 
-                lw <- last_week_triplet(base_df)
-                mtd_yoy <- matched_mtd_yoy_triplets(base_df)
-                full_yoy <- full_month_yoy_triplets(base_df)
-                ytd_tbl <- make_ytd_table(curr_flags)
+                monthly_sets <- reactive(make_monthly_datasets(base_df()))
+                curr_flags <- reactive(ytd_averages(base_df()))
                 
-                output$lastweek_header <- renderUI({
-                        h4(last_week_label(base_df))
+                selected_column <- reactive(metric_columns[[metric_reactive()]])
+                selected_label <- reactive(metric_labels[[metric_reactive()]])
+                selected_color <- reactive(metric_colors[[metric_reactive()]])
+                selected_service_label <- reactive(service_labels[[service_reactive()]])
+                
+                selected_monthly <- reactive({
+                        monthly_sets()[[metric_reactive()]]
                 })
                 
-                output$lastweek_table <- renderUI({
-                        tbl <- kbl(make_lastweek_table(lw), row.names = TRUE) |>
-                                kable_styling(bootstrap_options = c("striped"), full_width = FALSE) |>
-                                column_spec(1, bold = TRUE)
-                        HTML(as.character(tbl))
+                selected_value <- function(tbl, col) {
+                        value <- tbl[[col]][1]
+                        if (length(value) == 0 || !is.finite(value)) NA_real_ else as.numeric(value)
+                }
+                
+                display_number <- function(value, accuracy = 0.1) {
+                        if (is.na(value) || !is.finite(value)) {
+                                "—"
+                        } else {
+                                comma(round(value / accuracy) * accuracy, accuracy = accuracy)
+                        }
+                }
+                
+                comparison_ui <- function(current, previous, comparison_text) {
+                        pct <- safe_pct_change(current - previous, previous)
+                        if (is.na(pct) || !is.finite(pct)) {
+                                return(span(class = "kpi-comparison neutral", "Comparison unavailable"))
+                        }
+                        direction <- if (pct > 0) "up" else if (pct < 0) "down" else "flat"
+                        symbol <- if (pct > 0) "↑" else if (pct < 0) "↓" else "→"
+                        span(
+                                class = paste("kpi-comparison", direction),
+                                span(class = "direction-symbol", symbol),
+                                paste0(percent(abs(pct), accuracy = 0.1), " ", comparison_text)
+                        )
+                }
+                
+                kpi_card <- function(label, value, comparison, note, accuracy = 0.1) {
+                        div(
+                                class = "kpi-card",
+                                div(class = "kpi-label", label),
+                                div(class = "kpi-value", display_number(value, accuracy)),
+                                comparison,
+                                div(class = "kpi-note", note)
+                        )
+                }
+                
+                output$overview_period <- renderText({
+                        paste("Through", format(max(base_df()$Date, na.rm = TRUE), "%B %d, %Y"))
+                })
+                
+                output$lastweek_card <- renderUI({
+                        col <- selected_column()
+                        recent <- base_df() |>
+                                filter(!is.na(.data[[col]])) |>
+                                arrange(Date) |>
+                                slice_tail(n = 2)
+                        current <- if (nrow(recent) >= 1) tail(recent[[col]], 1) else NA_real_
+                        previous <- if (nrow(recent) >= 2) recent[[col]][nrow(recent) - 1] else NA_real_
+                        latest_date <- if (nrow(recent)) max(recent$Date) else as.Date(NA)
+                        kpi_card(
+                                "Last week",
+                                current,
+                                comparison_ui(current, previous, "from the prior week"),
+                                if (is.na(latest_date)) "No recent date" else format(latest_date, "%B %d, %Y"),
+                                accuracy = 1
+                        )
+                })
+                
+                output$mtd_card <- renderUI({
+                        comparison <- matched_mtd_yoy_triplets(base_df())
+                        col <- selected_column()
+                        current <- selected_value(comparison$curr, col)
+                        previous <- selected_value(comparison$prev, col)
+                        kpi_card(
+                                "Month-to-date average",
+                                current,
+                                comparison_ui(current, previous, "year over year"),
+                                paste(comparison$curr_month_lbl, "·", comparison$n_compare, "matched weeks")
+                        )
+                })
+                
+                output$ytd_card <- renderUI({
+                        flags <- curr_flags()
+                        col <- selected_column()
+                        current <- selected_value(flags$weekly_ave_curr, col)
+                        previous <- selected_value(flags$weekly_ave_past, col)
+                        kpi_card(
+                                "Year-to-date average",
+                                current,
+                                comparison_ui(current, previous, "year over year"),
+                                paste(flags$curr_n, "service weeks")
+                        )
+                })
+                
+                output$overview_chart_title <- renderText({
+                        paste(selected_service_label(), "·", selected_label())
+                })
+                
+                output$trend_chart_title <- renderText({
+                        paste(selected_service_label(), selected_label(), "attendance over time")
                 })
                 
                 output$mtd_table <- renderUI({
-                        tbl <- kbl(make_mtd_table(mtd_yoy), row.names = TRUE) |>
-                                kable_styling(bootstrap_options = c("striped"), full_width = FALSE) |>
+                        tbl <- kbl(make_mtd_table(matched_mtd_yoy_triplets(base_df())), row.names = TRUE) |>
+                                kable_styling(bootstrap_options = c("striped", "responsive"), full_width = TRUE) |>
                                 add_header_above(c(" " = 1, "Matched month-to-date weekly average" = 2, "Year-over-year" = 2)) |>
                                 column_spec(1, bold = TRUE)
                         HTML(as.character(tbl))
                 })
                 
                 output$fullmonth_table <- renderUI({
-                        tbl <- kbl(make_fullmonth_table(full_yoy), row.names = TRUE) |>
-                                kable_styling(bootstrap_options = c("striped"), full_width = FALSE) |>
+                        tbl <- kbl(make_fullmonth_table(full_month_yoy_triplets(base_df())), row.names = TRUE) |>
+                                kable_styling(bootstrap_options = c("striped", "responsive"), full_width = TRUE) |>
                                 add_header_above(c(" " = 1, "Full-month weekly average" = 2, "Year-over-year" = 2)) |>
                                 column_spec(1, bold = TRUE)
                         HTML(as.character(tbl))
                 })
                 
                 output$ytd_table <- renderUI({
-                        tbl <- kbl(ytd_tbl, row.names = TRUE) |>
-                                kable_styling(bootstrap_options = c("striped"), full_width = FALSE) |>
+                        tbl <- kbl(make_ytd_table(curr_flags()), row.names = TRUE) |>
+                                kable_styling(bootstrap_options = c("striped", "responsive"), full_width = TRUE) |>
                                 add_header_above(c(" " = 1, "Year-to-date weekly average" = 2, " " = 1, " " = 1)) |>
                                 column_spec(1, bold = TRUE)
                         HTML(as.character(tbl))
                 })
                 
-                ds_reactive <- reactive({
-                        switch(
-                                input$dataset,
-                                in_person = monthly_sets$in_person,
-                                online    = monthly_sets$online,
-                                total     = monthly_sets$total
-                        )
+                output$overview_trend <- renderPlotly({
+                        col <- selected_column()
+                        d <- base_df() |>
+                                transmute(Date, attendance = .data[[col]]) |>
+                                filter(!is.na(attendance))
+                        
+                        p <- plot_ly(
+                                d,
+                                x = ~Date,
+                                y = ~attendance,
+                                type = "scatter",
+                                mode = "lines+markers",
+                                line = list(color = selected_color(), width = 3),
+                                marker = list(color = selected_color(), size = 6),
+                                text = ~paste0(
+                                        format(Date, "%B %d, %Y"),
+                                        "<br>", selected_label(), ": ", comma(round(attendance))
+                                ),
+                                hoverinfo = "text",
+                                name = selected_label()
+                        ) |>
+                                layout(
+                                        xaxis = list(title = "", rangeslider = list(visible = FALSE)),
+                                        yaxis = list(title = "Attendance", rangemode = "tozero", tickformat = ",d"),
+                                        margin = list(l = 65, r = 25, b = 55, t = 20),
+                                        hovermode = "x unified",
+                                        showlegend = FALSE
+                                ) |>
+                                config(displaylogo = FALSE, responsive = TRUE)
+                        p
+                })
+                
+                selected_months <- reactive({
+                        selected <- month_key[[input$month]]
+                        if (is.na(selected)) 1:12 else selected
                 })
                 
                 output$seasonal <- renderPlotly({
-                        d <- ds_reactive() |> filter(month(Date) %in% sel_months())
-                        
-                        gp <- ggplot(d, aes(Date, attendance)) +
-                                theme_classic() +
-                                geom_point() +
-                                geom_line() +
-                                geom_smooth(method = "loess", formula = "y~x", col = "red") +
-                                labs(
-                                        title = "Weekly average attendance by month",
-                                        x = "Date",
-                                        y = "Average attendance"
+                        d <- selected_monthly() |>
+                                filter(month(Date) %in% selected_months()) |>
+                                mutate(
+                                        hover = paste0(
+                                                format(Date, "%B %Y"),
+                                                "<br>Weekly average: ", comma(round(attendance, 1), accuracy = 0.1)
+                                        )
                                 )
                         
-                        ggplotly(gp)
+                        plot_ly(
+                                d,
+                                x = ~Date,
+                                y = ~attendance,
+                                type = "scatter",
+                                mode = "lines",
+                                line = list(color = selected_color(), width = 3),
+                                text = ~hover,
+                                hoverinfo = "text",
+                                name = selected_label()
+                        ) |>
+                                layout(
+                                        xaxis = list(title = ""),
+                                        yaxis = list(title = "Average attendance", rangemode = "tozero", tickformat = ",d"),
+                                        margin = list(l = 65, r = 25, b = 55, t = 20),
+                                        hovermode = "x unified",
+                                        showlegend = FALSE
+                                ) |>
+                                config(displaylogo = FALSE, responsive = TRUE)
                 })
                 
                 output$spaghetti <- renderPlotly({
-                        d <- ds_reactive()
+                        flags <- curr_flags()
+                        monthly <- selected_monthly() |>
+                                filter(is.finite(attendance)) |>
+                                mutate(
+                                        YearNumber = year(Date),
+                                        MonthNumber = month(Date),
+                                        PlotDate = as.Date(sprintf("2000-%02d-01", MonthNumber)),
+                                        hover = paste0(
+                                                format(Date, "%B %Y"),
+                                                "<br>Weekly average: ", comma(round(attendance, 1), accuracy = 0.1)
+                                        )
+                                )
                         
-                        s <- d |>
-                                mutate(Year = factor(year(Date)), Date = update(Date, year = 1)) |>
-                                ggplot(aes(Date, attendance, colour = Year)) +
-                                scale_x_date(date_breaks = "1 month", date_labels = "%b") +
-                                geom_line(aes(group = Year), colour = "black", alpha = 0.1) +
-                                geom_line(data = function(x) filter(x, Year == curr_flags$prev_year), lwd = 0.5) +
-                                geom_line(data = function(x) filter(x, Year == curr_flags$curr_year), lwd = 1) +
-                                theme_bw() +
-                                labs(y = "Average attendance per week", x = "Month")
+                        history <- monthly |>
+                                filter(
+                                        YearNumber >= flags$curr_year - 10,
+                                        YearNumber <= flags$curr_year - 1
+                                )
                         
-                        ggplotly(s)
+                        benchmark <- history |>
+                                group_by(MonthNumber, PlotDate) |>
+                                summarise(
+                                        median_attendance = median(attendance, na.rm = TRUE),
+                                        lower_80 = quantile(attendance, probs = 0.10, na.rm = TRUE, names = FALSE),
+                                        upper_80 = quantile(attendance, probs = 0.90, na.rm = TRUE, names = FALSE),
+                                        history_years = n_distinct(YearNumber),
+                                        .groups = "drop"
+                                ) |>
+                                arrange(PlotDate) |>
+                                mutate(
+                                        median_hover = paste0(
+                                                month(PlotDate, label = TRUE, abbr = FALSE),
+                                                "<br>10-year median: ", comma(round(median_attendance, 1), accuracy = 0.1),
+                                                "<br>Central 80%: ", comma(round(lower_80, 1), accuracy = 0.1),
+                                                "–", comma(round(upper_80, 1), accuracy = 0.1),
+                                                "<br>Years available: ", history_years
+                                        )
+                                )
+                        
+                        current_year <- monthly |> filter(YearNumber == flags$curr_year) |> arrange(PlotDate)
+                        previous_year <- monthly |> filter(YearNumber == flags$prev_year) |> arrange(PlotDate)
+                        
+                        p <- plot_ly()
+                        
+                        if (nrow(benchmark)) {
+                                p <- p |>
+                                        add_ribbons(
+                                                data = benchmark,
+                                                x = ~PlotDate,
+                                                ymin = ~lower_80,
+                                                ymax = ~upper_80,
+                                                name = "Historical central 80%",
+                                                fillcolor = "rgba(185, 191, 191, 0.38)",
+                                                line = list(color = "rgba(185, 191, 191, 0)"),
+                                                hoverinfo = "skip",
+                                                opacity = 1
+                                        ) |>
+                                        add_lines(
+                                                data = benchmark,
+                                                x = ~PlotDate,
+                                                y = ~median_attendance,
+                                                name = "10-year median",
+                                                line = list(color = "#505858", width = 3),
+                                                text = ~median_hover,
+                                                hoverinfo = "text"
+                                        )
+                        }
+                        
+                        if (nrow(previous_year)) {
+                                p <- p |>
+                                        add_lines(
+                                                data = previous_year,
+                                                x = ~PlotDate,
+                                                y = ~attendance,
+                                                name = as.character(flags$prev_year),
+                                                line = list(color = "#7b2cbf", width = 3, dash = "dash"),
+                                                text = ~hover,
+                                                hoverinfo = "text"
+                                        )
+                        }
+                        
+                        if (nrow(current_year)) {
+                                p <- p |>
+                                        add_lines(
+                                                data = current_year,
+                                                x = ~PlotDate,
+                                                y = ~attendance,
+                                                name = as.character(flags$curr_year),
+                                                line = list(color = "#e53935", width = 4, dash = "solid"),
+                                                text = ~hover,
+                                                hoverinfo = "text"
+                                        )
+                        }
+                        
+                        p |>
+                                layout(
+                                        xaxis = list(title = "", tickformat = "%b", dtick = "M1"),
+                                        yaxis = list(title = "Average attendance", rangemode = "tozero", tickformat = ",d"),
+                                        legend = list(orientation = "h", x = 0, y = 1.12),
+                                        margin = list(l = 65, r = 25, b = 55, t = 55),
+                                        hovermode = "x unified"
+                                ) |>
+                                config(displaylogo = FALSE, responsive = TRUE)
                 })
         })
 }
@@ -900,36 +1093,54 @@ forecastTabUI <- function(id) {
         
         tabPanel(
                 "Forecast",
-                sidebarLayout(
-                        sidebarPanel(
-                                selectInput(
-                                        ns("fc_service"),
-                                        "Service",
-                                        choices = c("Overall" = "overall", "Ascent" = "ascent", "Sanctuary" = "sanct"),
-                                        selected = "overall"
-                                ),
-                                selectInput(
-                                        ns("fc_dataset"),
-                                        "Data set",
-                                        choices = c("Total" = "total", "In Person" = "in_person", "Online" = "online"),
-                                        selected = "total"
-                                ),
-                                sliderInput(
-                                        ns("fc_horizon"),
-                                        "Forecast horizon (weeks)",
-                                        min = 8,
-                                        max = 52,
-                                        value = 26,
-                                        step = 1
-                                ),
-                                helpText("Performance-weighted ensemble: Prophet + ARIMA (+xregs) + ETS with SDA holiday effects and 80% intervals + event uplifts.")
+                div(
+                        class = "dashboard-section",
+                        div(
+                                class = "section-heading",
+                                div(
+                                        span(class = "eyebrow", "PLANNING OUTLOOK"),
+                                        h2(textOutput(ns("fc_heading"), inline = TRUE))
+                                )
                         ),
-                        mainPanel(
-                                h3("Weekly Attendance Forecast (2 to 12 months)"),
-                                plotlyOutput(ns("fc_plot")),
-                                br(),
-                                h4("Backtest accuracy (last horizon)"),
-                                tableOutput(ns("fc_accuracy"))
+                        div(
+                                class = "content-card forecast-controls",
+                                selectInput(
+                                        ns("fc_horizon"),
+                                        "Forecast length",
+                                        choices = c("8 weeks" = 8, "13 weeks" = 13, "26 weeks" = 26, "52 weeks" = 52),
+                                        selected = 26,
+                                        width = "220px"
+                                ),
+                                actionButton(ns("fc_update"), "Update forecast", class = "btn-primary forecast-button")
+                        ),
+                        div(
+                                class = "forecast-explainer",
+                                strong("How to read this forecast: "),
+                                span("The solid line shows recorded attendance, the dashed line shows the forecast, and the shaded area shows the likely range. Seasonal patterns and major church events are included.")
+                        ),
+                        div(
+                                class = "content-card chart-card",
+                                plotlyOutput(ns("fc_plot"), height = "460px")
+                        ),
+                        fluidRow(
+                                column(
+                                        7,
+                                        div(
+                                                class = "content-card forecast-table-card",
+                                                h3("Upcoming weeks"),
+                                                tableOutput(ns("fc_table"))
+                                        )
+                                ),
+                                column(
+                                        5,
+                                        tags$details(
+                                                class = "content-card model-details",
+                                                open = NA,
+                                                tags$summary("View model accuracy"),
+                                                p(class = "detail-intro", "Backtest results show how each model performed over the most recent holdout period."),
+                                                uiOutput(ns("fc_accuracy"))
+                                        )
+                                )
                         )
                 )
         )
@@ -938,16 +1149,25 @@ forecastTabUI <- function(id) {
 ## ------------------------------
 ## 7) Forecast module (Server)
 ## ------------------------------
-forecastTabServer <- function(id, Weekly_data, svc_map) {
+forecastTabServer <- function(id, Weekly_data, svc_map, service_reactive, metric_reactive) {
         moduleServer(id, function(input, output, session) {
+                service_labels <- c(overall = "Overall", ascent = "Ascent", sanct = "Sanctuary")
+                metric_labels <- c(total = "Total", in_person = "In-person", online = "Online")
+                
+                settings <- eventReactive(input$fc_update, {
+                        list(
+                                service = service_reactive() %||% "overall",
+                                metric = metric_reactive() %||% "total",
+                                horizon = as.integer(input$fc_horizon %||% 26)
+                        )
+                }, ignoreNULL = FALSE)
+                
+                output$fc_heading <- renderText({
+                        paste(service_labels[[settings()$service]], metric_labels[[settings()$metric]], "forecast")
+                })
                 
                 get_base_df <- reactive({
-                        switch(
-                                input$fc_service,
-                                overall = make_base(Weekly_data, svc_map$overall),
-                                ascent  = make_base(Weekly_data, svc_map$ascent),
-                                sanct   = make_base(Weekly_data, svc_map$sanct)
-                        )
+                        make_base(Weekly_data, svc_map[[settings()$service]])
                 })
                 
                 wk_regular <- reactive({
@@ -955,7 +1175,7 @@ forecastTabServer <- function(id, Weekly_data, svc_map) {
                 })
                 
                 series_tbl <- reactive({
-                        build_series_tbl(wk_regular(), input$fc_dataset)
+                        build_series_tbl(wk_regular(), settings()$metric)
                 })
                 
                 holidays_df <- reactive({
@@ -969,43 +1189,41 @@ forecastTabServer <- function(id, Weekly_data, svc_map) {
                 .model_cache <- reactiveVal(new.env(parent = emptyenv()))
                 
                 get_fit <- reactive({
-                        key <- paste(input$fc_service, input$fc_dataset, input$fc_horizon, sep = "_")
+                        key <- paste(settings()$service, settings()$metric, settings()$horizon, sep = "_")
                         cache <- .model_cache()
                         
                         if (!exists(key, envir = cache)) {
-                                fit <- fit_ensemble_weighted(
-                                        series_tbl = series_tbl(),
-                                        holidays_df = holidays_df(),
-                                        horizon_weeks = input$fc_horizon,
-                                        conf = 0.80
-                                )
+                                fit <- withProgress(message = "Building attendance forecast", value = 0.2, {
+                                        fit_result <- fit_ensemble_weighted(
+                                                series_tbl = series_tbl(),
+                                                holidays_df = holidays_df(),
+                                                horizon_weeks = settings()$horizon,
+                                                conf = 0.80
+                                        )
+                                        incProgress(0.8, detail = "Preparing chart and forecast table")
+                                        fit_result
+                                })
                                 assign(key, fit, envir = cache)
                         }
                         
                         get(key, envir = cache)
                 })
                 
-                output$fc_accuracy <- renderTable({
-                        acc <- get_fit()$accuracy |> normalize_metric_names()
-                        
-                        acc %>%
-                                dplyr::select(
-                                        model_desc = dplyr::any_of(c("model_desc", ".model_desc")),
-                                        rmse, mae, mape, rsq, weight
-                                ) %>%
-                                dplyr::mutate(dplyr::across(where(is.numeric), ~ round(.x, 3)))
-                })
-                
-                output$fc_plot <- renderPlotly({
+                forecast_data <- reactive({
                         fit <- get_fit()
                         
-                        fc <- make_forecast(
+                        make_forecast(
                                 refit_ens = fit$refit,
                                 series_tbl = series_tbl(),
-                                horizon_weeks = input$fc_horizon,
+                                horizon_weeks = settings()$horizon,
                                 conf = fit$conf,
                                 uplifts = event_uplifts()
                         )
+                })
+                
+                prepared_forecast <- reactive({
+                        fit <- get_fit()
+                        fc <- forecast_data()
                         
                         act  <- dplyr::filter(fc, .key == "actual")
                         pred <- dplyr::filter(fc, .key == "prediction")
@@ -1034,6 +1252,86 @@ forecastTabServer <- function(id, Weekly_data, svc_map) {
                                 }
                         }
                         
+                        list(actual = act, prediction = pred)
+                })
+                
+                output$fc_accuracy <- renderUI({
+                        raw_accuracy <- get_fit()$accuracy
+                        
+                        if (is.null(raw_accuracy) || nrow(raw_accuracy) == 0) {
+                                return(p(class = "detail-intro", "Model accuracy is not available for this forecast."))
+                        }
+                        
+                        acc <- raw_accuracy |>
+                                as_tibble() |>
+                                normalize_metric_names()
+                        
+                        required_numeric <- c("rmse", "mae", "mape", "rsq", "weight")
+                        if (!"model_desc" %in% names(acc)) acc$model_desc <- "Forecast model"
+                        for (column_name in required_numeric) {
+                                if (!column_name %in% names(acc)) acc[[column_name]] <- NA_real_
+                        }
+                        
+                        format_accuracy <- function(value) {
+                                ifelse(is.finite(value), format(round(value, 3), trim = TRUE), "—")
+                        }
+                        
+                        display_accuracy <- acc |>
+                                transmute(
+                                        Model = as.character(model_desc),
+                                        RMSE = format_accuracy(rmse),
+                                        MAE = format_accuracy(mae),
+                                        MAPE = format_accuracy(mape),
+                                        `R-squared` = format_accuracy(rsq),
+                                        Weight = format_accuracy(weight)
+                                )
+                        
+                        table_html <- kbl(
+                                display_accuracy,
+                                format = "html",
+                                row.names = FALSE,
+                                na = "—",
+                                align = c("l", "r", "r", "r", "r", "r")
+                        ) |>
+                                kable_styling(
+                                        bootstrap_options = c("striped", "responsive"),
+                                        full_width = TRUE
+                                )
+                        
+                        div(class = "table-responsive", HTML(as.character(table_html)))
+                })
+                
+                output$fc_table <- renderTable({
+                        pred <- prepared_forecast()$prediction |>
+                                arrange(.index) |>
+                                slice_head(n = 8)
+                        
+                        if (!all(c(".conf_lo", ".conf_hi") %in% names(pred))) {
+                                pred$.conf_lo <- NA_real_
+                                pred$.conf_hi <- NA_real_
+                        }
+                        
+                        pred |>
+                                transmute(
+                                        Week = format(.index, "%b %d, %Y"),
+                                        Expected = comma(round(.value)),
+                                        `Likely range` = if_else(
+                                                is.finite(.conf_lo) & is.finite(.conf_hi),
+                                                paste0(comma(round(.conf_lo)), "–", comma(round(.conf_hi))),
+                                                "—"
+                                        )
+                                )
+                }, striped = TRUE, bordered = FALSE, spacing = "s", align = "lrr")
+                
+                # Native <details> elements do not always notify Shiny when
+                # they are opened, so render the accuracy table in advance.
+                outputOptions(output, "fc_accuracy", suspendWhenHidden = FALSE)
+                
+                output$fc_plot <- renderPlotly({
+                        parts <- prepared_forecast()
+                        act <- parts$actual
+                        pred <- parts$prediction
+                        
                         p <- plotly::plot_ly()
                         
                         if (nrow(pred)) {
@@ -1045,28 +1343,48 @@ forecastTabServer <- function(id, Weekly_data, svc_map) {
                                                         x = ~.index,
                                                         ymin = ~.conf_lo,
                                                         ymax = ~.conf_hi,
-                                                        name = "80% CI",
+                                                        name = "Likely range (80%)",
                                                         hoverinfo = "skip",
-                                                        opacity = 0.25
+                                                        fillcolor = "rgba(110, 168, 215, 0.18)",
+                                                        line = list(color = "rgba(110, 168, 215, 0)"),
+                                                        opacity = 1
                                                 )
                                 }
                         }
                         
                         if (nrow(act)) {
-                                p <- p %>% add_lines(data = act, x = ~.index, y = ~.value, name = "Actuals")
+                                p <- p %>% add_lines(
+                                        data = act,
+                                        x = ~.index,
+                                        y = ~.value,
+                                        name = "Recorded attendance",
+                                        line = list(color = "#58a8aa", width = 3),
+                                        text = ~paste0(format(.index, "%B %d, %Y"), "<br>Recorded: ", comma(round(.value))),
+                                        hoverinfo = "text"
+                                )
                         }
                         
                         if (nrow(pred)) {
-                                p <- p %>% add_lines(data = pred, x = ~.index, y = ~.value, name = "Forecast")
+                                p <- p %>% add_lines(
+                                        data = pred,
+                                        x = ~.index,
+                                        y = ~.value,
+                                        name = "Forecast",
+                                        line = list(color = "#6ea8d7", width = 3, dash = "dash"),
+                                        text = ~paste0(format(.index, "%B %d, %Y"), "<br>Forecast: ", comma(round(.value))),
+                                        hoverinfo = "text"
+                                )
                         }
                         
                         p %>%
                                 layout(
-                                        title = "Weekly Attendance Forecast (80% confidence interval + event uplifts)",
-                                        xaxis = list(title = "Week"),
-                                        yaxis = list(title = "Attendance"),
-                                        legend = list(orientation = "h", x = 0, y = 1.1)
-                                )
+                                        xaxis = list(title = ""),
+                                        yaxis = list(title = "Attendance", rangemode = "tozero", tickformat = ",d"),
+                                        legend = list(orientation = "h", x = 0, y = 1.08),
+                                        margin = list(l = 65, r = 25, b = 55, t = 45),
+                                        hovermode = "x unified"
+                                ) |>
+                                config(displaylogo = FALSE, responsive = TRUE)
                 })
         })
 }
@@ -1075,63 +1393,221 @@ forecastTabServer <- function(id, Weekly_data, svc_map) {
 ## 8) UI
 ## --------------------------
 ui <- fluidPage(
-        titlePanel("Kettering SDA Church Attendance"),
+        tags$head(
+                tags$meta(name = "viewport", content = "width=device-width, initial-scale=1"),
+                tags$style(HTML("
+                        :root {
+                                --brand: #285f61;
+                                --brand-dark: #1f4c4e;
+                                --brand-soft: #e7f0ef;
+                                --blue: #2f6fa3;
+                                --ink: #24302f;
+                                --muted: #687574;
+                                --line: #dfe6e5;
+                                --page: #f5f7f6;
+                                --surface: #ffffff;
+                                --positive: #26734d;
+                                --negative: #a54238;
+                        }
+                        body {
+                                background: var(--page);
+                                color: var(--ink);
+                                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                        }
+                        .container-fluid { max-width: 1240px; padding: 0 28px 30px; }
+                        .app-header {
+                                display: flex;
+                                align-items: center;
+                                justify-content: space-between;
+                                gap: 20px;
+                                padding: 26px 0 18px;
+                        }
+                        .brand-block { display: flex; align-items: center; gap: 13px; }
+                        .brand-mark {
+                                display: grid;
+                                place-items: center;
+                                width: 42px;
+                                height: 42px;
+                                border-radius: 50%;
+                                background: var(--brand);
+                                color: white;
+                                font-size: 21px;
+                                font-weight: 600;
+                        }
+                        .app-title { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -0.02em; }
+                        .data-status { color: var(--muted); font-size: 13px; margin-top: 3px; }
+                        .status-pill {
+                                display: inline-flex;
+                                align-items: center;
+                                gap: 7px;
+                                padding: 7px 11px;
+                                border-radius: 999px;
+                                background: var(--brand-soft);
+                                color: var(--brand-dark);
+                                font-size: 12px;
+                                font-weight: 600;
+                        }
+                        .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--positive); }
+                        .global-filter-card {
+                                display: grid;
+                                grid-template-columns: 1fr 1fr;
+                                gap: 28px;
+                                padding: 18px 22px 9px;
+                                margin-bottom: 18px;
+                                background: var(--surface);
+                                border: 1px solid var(--line);
+                                border-radius: 12px;
+                                box-shadow: 0 5px 18px rgba(31, 55, 53, 0.05);
+                        }
+                        .filter-label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; }
+                        .global-filter-card .form-group { margin-bottom: 9px; }
+                        .global-filter-card .radio-inline { margin: 0 18px 7px 0; color: var(--ink); }
+                        .global-filter-card input[type='radio'] { accent-color: var(--brand); }
+                        .nav-tabs { border-bottom: 1px solid var(--line); margin-bottom: 0; }
+                        .nav-tabs > li > a { color: var(--muted); border: 0 !important; background: transparent !important; padding: 13px 18px; font-weight: 500; }
+                        .nav-tabs > li.active > a, .nav-tabs > li > a:hover { color: var(--brand-dark); }
+                        .nav-tabs > li.active > a { box-shadow: inset 0 -3px 0 var(--brand); }
+                        .dashboard-section { padding: 28px 0 10px; }
+                        .section-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; margin-bottom: 16px; }
+                        .section-heading h2, .section-heading h3 { margin: 2px 0 0; }
+                        .section-heading h2 { font-size: 25px; }
+                        .section-heading h3, .content-card h3 { font-size: 18px; }
+                        .eyebrow { color: var(--brand); font-size: 11px; font-weight: 700; letter-spacing: .11em; }
+                        .period-label { color: var(--muted); font-size: 13px; }
+                        .kpi-card, .content-card {
+                                background: var(--surface);
+                                border: 1px solid var(--line);
+                                border-radius: 12px;
+                                box-shadow: 0 5px 18px rgba(31, 55, 53, 0.05);
+                        }
+                        .kpi-card { min-height: 154px; padding: 19px 20px; margin-bottom: 20px; }
+                        .kpi-label { color: var(--muted); font-size: 13px; font-weight: 600; }
+                        .kpi-value { margin: 5px 0 1px; color: var(--ink); font-size: 34px; font-weight: 650; letter-spacing: -0.035em; }
+                        .kpi-comparison { display: block; min-height: 20px; font-size: 13px; font-weight: 600; }
+                        .kpi-comparison.up { color: var(--positive); }
+                        .kpi-comparison.down { color: var(--negative); }
+                        .kpi-comparison.neutral, .kpi-comparison.flat { color: var(--muted); }
+                        .direction-symbol { margin-right: 4px; }
+                        .kpi-note { color: var(--muted); font-size: 12px; margin-top: 9px; }
+                        .content-card { padding: 20px 22px; margin-bottom: 20px; }
+                        .chart-card { padding-bottom: 10px; }
+                        .chart-heading { margin-bottom: 0; }
+                        .comparison-details summary, .model-details summary { cursor: pointer; color: var(--brand-dark); font-weight: 650; }
+                        .comparison-details h4 { margin-top: 24px; }
+                        .detail-intro, .chart-description, .control-help { color: var(--muted); font-size: 13px; }
+                        .comparison-details .table { width: 100% !important; }
+                        .trend-filter-card { padding-bottom: 10px; }
+                        .trend-filter-card .form-group { margin-bottom: 5px; }
+                        .forecast-controls { display: flex; align-items: flex-end; gap: 14px; padding-bottom: 11px; }
+                        .forecast-controls .form-group { margin-bottom: 9px; }
+                        .forecast-button { margin-bottom: 9px; background: var(--brand); border-color: var(--brand); }
+                        .forecast-button:hover, .forecast-button:focus { background: var(--brand-dark); border-color: var(--brand-dark); }
+                        .forecast-explainer { padding: 13px 15px; margin-bottom: 20px; border-left: 4px solid var(--blue); background: #edf3f8; color: #3f4f5d; font-size: 13px; }
+                        .forecast-table-card, .model-details { min-height: 230px; }
+                        .table > thead > tr > th { color: var(--muted); border-bottom: 1px solid var(--line); font-size: 12px; }
+                        .table > tbody > tr > td { border-top: 1px solid #edf1f0; }
+                        .app-footer { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-top: 30px; padding: 20px 0 5px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+                        .app-footer a { color: var(--brand-dark); }
+                        @media (max-width: 767px) {
+                                .container-fluid { padding: 0 16px 24px; }
+                                .app-header { align-items: flex-start; }
+                                .status-pill { display: none; }
+                                .global-filter-card { grid-template-columns: 1fr; gap: 4px; }
+                                .section-heading { align-items: flex-start; flex-direction: column; gap: 5px; }
+                                .forecast-controls { align-items: stretch; flex-direction: column; }
+                                .forecast-button { width: 100%; }
+                                .nav-tabs > li > a { padding: 11px 12px; }
+                        }
+                "))
+        ),
+        tags$header(
+                class = "app-header",
+                div(
+                        class = "brand-block",
+                        div(class = "brand-mark", "K"),
+                        div(
+                                h1(class = "app-title", "Kettering SDA Attendance"),
+                                div(class = "data-status", textOutput("data_status", inline = TRUE))
+                        )
+                ),
+                div(class = "status-pill", span(class = "status-dot"), "Data current")
+        ),
+        tags$section(
+                class = "global-filter-card",
+                div(
+                        span(class = "filter-label", "Service"),
+                        radioButtons(
+                                "service",
+                                label = NULL,
+                                choices = c("Overall" = "overall", "Ascent" = "ascent", "Sanctuary" = "sanct"),
+                                selected = "overall",
+                                inline = TRUE
+                        )
+                ),
+                div(
+                        span(class = "filter-label", "Attendance type"),
+                        radioButtons(
+                                "dataset",
+                                label = NULL,
+                                choices = c("Total" = "total", "In person" = "in_person", "Online" = "online"),
+                                selected = "total",
+                                inline = TRUE
+                        )
+                )
+        ),
         tabsetPanel(
-                attendanceTabUI("overall",   "Overall"),
-                attendanceTabUI("ascent",    "Ascent"),
-                attendanceTabUI("sanctuary", "Sanctuary"),
+                id = "main_navigation",
+                attendanceOverviewUI("attendance"),
+                attendanceTrendsUI("attendance"),
                 forecastTabUI("forecast")
         ),
-        hr(),
-        h4("Created by: Jim Milks"),
-        "Version 6", br(),
-        "Updated 15 April 2026", br(),
-        "Code and data available at:",
-        a(
-                href = "https://github.com/jrmilks74/KetSDA/tree/main",
-                "https://github.com/jrmilks74/KetSDA/tree/main"
-        ),
-        br(),
-        "Data updated every Monday"
+        tags$footer(
+                class = "app-footer",
+                span("Created by Jim Milks · Version 7"),
+                span(
+                        "Data updated every Monday · ",
+                        a(
+                                href = "https://github.com/jrmilks74/KetSDA/tree/main",
+                                target = "_blank",
+                                rel = "noopener noreferrer",
+                                "View source code"
+                        )
+                )
+        )
 )
 
 ## --------------------------
 ## 9) Server
 ## --------------------------
 server <- function(input, output, session) {
-        # OVERALL
-        overall_base <- make_base(Weekly_data, svc_map$overall)
-        overall_flags <- ytd_averages(overall_base)
-        overall_monthly <- make_monthly_datasets(overall_base)
-        attendanceTabServer("overall", overall_base, overall_monthly, overall_flags)
+        selected_service <- reactive(input$service)
+        selected_metric <- reactive(input$dataset)
         
-        # ASCENT
-        ascent_base <- make_base(Weekly_data, svc_map$ascent)
-        ascent_flags <- ytd_averages(ascent_base)
-        ascent_monthly <- make_monthly_datasets(ascent_base)
-        attendanceTabServer("ascent", ascent_base, ascent_monthly, ascent_flags)
+        output$data_status <- renderText({
+                latest_date <- max(Weekly_data$Date, na.rm = TRUE)
+                paste0("Last attendance date: ", format(latest_date, "%B %d, %Y"), " · Updated weekly")
+        })
         
-        # SANCTUARY
-        sanct_base <- make_base(Weekly_data, svc_map$sanct)
-        sanct_flags <- ytd_averages(sanct_base)
-        sanct_monthly <- make_monthly_datasets(sanct_base)
-        attendanceTabServer("sanctuary", sanct_base, sanct_monthly, sanct_flags)
+        attendanceDashboardServer(
+                "attendance",
+                Weekly_data,
+                svc_map,
+                selected_service,
+                selected_metric
+        )
         
-        # FORECAST
-        forecastTabServer("forecast", Weekly_data, svc_map)
+        forecastTabServer(
+                "forecast",
+                Weekly_data,
+                svc_map,
+                selected_service,
+                selected_metric
+        )
 }
 
-# Drop-in forecasting overrides for the Kettering SDA attendance dashboard.
-#
-# Source this file after the dashboard's forecasting functions have been
-# defined and before shinyApp(ui, server):
-#
-#   source("baccalaureate_forecast_overrides.R")
-#
-# The ordinary weekly ensemble remains unchanged.  For the Saturday before
-# Memorial Day, its potentially event-contaminated point forecast is replaced
-# with a dedicated estimate learned from prior baccalaureate services and the
-# forecast level of the surrounding non-event weeks.
+# Baccalaureate-specific forecasting adjustments ----------------------------
+# The Saturday before Memorial Day uses an estimate learned from prior
+# baccalaureate services and the surrounding non-event weeks.
 
 
 # Locale-independent calculation of recurring service weeks -----------------
@@ -1289,13 +1765,8 @@ make_holiday_df_weekly <- function(date_range) {
 }
 
 
-# Extend the existing uplift learner without changing Easter/Christmas logic.
-if (!exists(".compute_event_uplifts_before_baccalaureate", inherits = FALSE)) {
-        .compute_event_uplifts_before_baccalaureate <- compute_event_uplifts
-}
-
 compute_event_uplifts <- function(series_tbl, lookback_years = 5L) {
-        out <- .compute_event_uplifts_before_baccalaureate(
+        out <- .compute_event_uplifts_base(
                 series_tbl,
                 lookback_years = min(lookback_years, 3L)
         )
@@ -1334,13 +1805,6 @@ compute_event_uplifts <- function(series_tbl, lookback_years = 5L) {
 }
 
 
-# Preserve the existing Easter and Christmas adjustments, disable its generic
-# graduation adjustment, then replace the baccalaureate point and interval with
-# the dedicated event estimate.
-if (!exists(".apply_event_uplifts_before_baccalaureate", inherits = FALSE)) {
-        .apply_event_uplifts_before_baccalaureate <- apply_event_uplifts
-}
-
 apply_event_uplifts <- function(fc_all, future_tbl, uplifts,
                                 grad_add_shrink = 0.60,
                                 grad_mult_shrink = 0.25,
@@ -1353,7 +1817,7 @@ apply_event_uplifts <- function(fc_all, future_tbl, uplifts,
         legacy_uplifts$grad$mult <- 0
         legacy_uplifts$grad$max <- NA_real_
         
-        out <- .apply_event_uplifts_before_baccalaureate(
+        out <- .apply_event_uplifts_base(
                 fc_all = fc_all,
                 future_tbl = future_tbl,
                 uplifts = legacy_uplifts,
@@ -1475,13 +1939,9 @@ apply_event_uplifts <- function(fc_all, future_tbl, uplifts,
         )
 }
 
-if (!exists(".fit_ensemble_weighted_before_baccalaureate", inherits = FALSE)) {
-        .fit_ensemble_weighted_before_baccalaureate <- fit_ensemble_weighted
-}
-
 fit_ensemble_weighted <- function(series_tbl, holidays_df,
                                   horizon_weeks = 13, conf = 0.80) {
-        out <- .fit_ensemble_weighted_before_baccalaureate(
+        out <- .fit_ensemble_weighted_base(
                 series_tbl = series_tbl,
                 holidays_df = holidays_df,
                 horizon_weeks = horizon_weeks,
